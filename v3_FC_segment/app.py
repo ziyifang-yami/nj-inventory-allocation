@@ -92,26 +92,34 @@ def load_inventory():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    wit.item_number,
+                    wsli.item_number,
                     SUM(CASE
-                        WHEN wit.location_no NOT LIKE 'S%%'
-                         AND wit.location_no NOT LIKE 'DC%%'
-                         AND wit.location_no NOT LIKE 'K%%'
+                        WHEN wsli.location_no NOT LIKE 'S%%'
+                         AND wsli.location_no NOT LIKE 'DC%%'
+                         AND wsli.location_no NOT LIKE 'K%%'
                         THEN wit.quantity ELSE 0 END) AS fc_qty,
                     SUM(CASE
-                        WHEN wit.location_no     LIKE 'S%%'
-                          OR wit.location_no     LIKE 'DC%%'
-                          OR wit.location_no     LIKE 'K%%'
+                        WHEN wsli.location_no     LIKE 'S%%'
+                          OR wsli.location_no     LIKE 'DC%%'
+                          OR wsli.location_no     LIKE 'K%%'
                         THEN wit.quantity ELSE 0 END) AS sfc_qty
-                FROM yamibuy_wh.wh_inventory_transaction wit
+                FROM yamibuy_wh.wh_storage_location_item wsli
+                JOIN yamibuy_wh.wh_inventory_transaction wit
+                    ON wit.item_number      = wsli.item_number
+                   AND wit.warehouse_number = wsli.warehouse_number
+                   AND wit.location_no      = wsli.location_no
                 JOIN yamibuy_wh.wh_storage_location wsl
-                    ON wsl.location_no      = wit.location_no
-                   AND wsl.warehouse_number = wit.warehouse_number
-                WHERE wit.warehouse_number = '002'
-                  AND wit.quantity > 0
+                    ON wsl.location_no      = wsli.location_no
+                   AND wsl.warehouse_number = wsli.warehouse_number
+                JOIN yamibuy_wh.wh_location_size wls
+                    ON wls.size_id = wsl.size_id
+                WHERE wsli.warehouse_number = '002'
+                  AND wit.quantity IS NOT NULL
+                  AND wit.quantity != 0
                   AND wsl.location_type IN (3, 4)
-                  AND (wit.item_number LIKE '1%%' OR wit.item_number LIKE '5%%')
-                GROUP BY wit.item_number
+                  AND wsl.size_id NOT IN (13, 33)
+                  AND (wsli.item_number LIKE '1%%' OR wsli.item_number LIKE '5%%')
+                GROUP BY wsli.item_number
                 HAVING fc_qty > 0 OR sfc_qty > 0
             """)
             cols = [d[0] for d in cur.description]
@@ -333,14 +341,16 @@ def load_tail_locations(skus):
     return _load_fc_locations(skus)
 
 @st.cache_data(ttl=1800)
-def load_sku_loc_stats(skus):
+def load_sku_loc_stats(skus_tuple):
     """
     Real-time: for each SKU, get total FC volume (qty×unit_vol) and occupied FC location count.
     Used for priority sorting in run_planning.
     Works for both TAIL (full clear) and MIDDLE evict SKUs.
+    Accepts a TUPLE (not list) so @st.cache_data can hash it correctly.
     """
     import os
     from pathlib import Path
+    skus = list(skus_tuple)
     if not skus:
         return pd.DataFrame(columns=["item_number","total_vol","loc_count"])
     try:
@@ -364,7 +374,6 @@ def load_sku_loc_stats(skus):
             WHERE li.warehouse_number = '002'
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
-              AND wsl.size_id NOT IN (13, 33)
               AND (li.location_no NOT LIKE 'S%%'
                AND li.location_no NOT LIKE 'DC%%'
                AND li.location_no NOT LIKE 'K%%')
@@ -420,7 +429,6 @@ def _load_fc_locations(skus):
             WHERE li.warehouse_number = '002'
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
-              AND wsl.size_id NOT IN (13, 33)
               AND (li.location_no NOT LIKE 'S%%'
                AND li.location_no NOT LIKE 'DC%%'
                AND li.location_no NOT LIKE 'K%%')
@@ -2224,6 +2232,9 @@ with page_capacity:
         st.plotly_chart(fig_cap, use_container_width=True)
 
 # ── Planning Tab ──────────────────────────────────────────────
+# Ensure df_cap is always defined (fallback if capacity tab not yet rendered)
+if "df_cap" not in dir():
+    df_cap, _ = load_capacity()
 with page_planning:
     st.markdown("### 📋 Transfer Planning Simulator")
     st.caption("Simulate how many SKUs can be transferred within the plan window given daily capacity constraints.")
@@ -2337,17 +2348,34 @@ with page_planning:
         )
 
     # Load FC→DC SKU stats (TAIL + MIDDLE evict) for real-time volume + location sort
+    # Use tuple so @st.cache_data can hash it — avoids re-querying MySQL on every slider change
     _mid_evict_skus = df[
         (df["seg"]=="MIDDLE") & (df["avg_daily_orders"]>0) &
         ((df["fc_qty"] / df["avg_daily_orders"].replace(0, float("nan"))) > st.session_state.get("p_mid_evict", 30))
     ]["item_number"].astype(str).tolist()
     _tail_skus = df[(df["seg"]=="TAIL") & (df["fc_qty"]>0)]["item_number"].astype(str).tolist()
-    _fc_out_skus = list(set(_tail_skus + _mid_evict_skus))
-    with st.spinner("Loading FC location stats for sorting..."):
-        _sku_stats = load_sku_loc_stats(_fc_out_skus)
+    _fc_out_skus_tuple = tuple(sorted(set(_tail_skus + _mid_evict_skus)))
+    # Only show spinner on first load (when not cached yet)
+    _sku_stats = load_sku_loc_stats(_fc_out_skus_tuple)
 
-    with st.spinner("Running..."):
-        df_sched, daily, smry = run_planning(df, {**plan_params, "tail_stats": _sku_stats})
+    # Cache run_planning result: only recompute when params or segment assignment changes
+    _plan_key = str((
+        daily_cap_in, daily_cap_out, pallet_cap_in, pallet_cap_out, p_days,
+        p_top_trig, p_top_target, p_mid_rout, p_mid_evict, p_mid_target,
+        p_min_loc, aod_top, ol_top, ol_tail, len(_fc_out_skus_tuple),
+    ))
+    if (st.session_state.get("_plan_cache_key") != _plan_key
+            or "df_sched" not in st.session_state):
+        with st.spinner("Running planning simulation..."):
+            _df_sched, _daily, _smry = run_planning(df, {**plan_params, "tail_stats": _sku_stats})
+        st.session_state["df_sched"] = _df_sched
+        st.session_state["daily"]    = _daily
+        st.session_state["smry"]     = _smry
+        st.session_state["_plan_cache_key"] = _plan_key
+
+    df_sched = st.session_state["df_sched"]
+    daily    = st.session_state["daily"]
+    smry     = st.session_state["smry"]
 
     # ── MIDDLE DC→FC diagnosis ────────────────────────────────
     with st.expander("🔍 Planning Debug", expanded=False):
@@ -2837,3 +2865,101 @@ with page_planning:
                 "transfer_vol":   st.column_config.NumberColumn("Vol(in³)",format="%d"),
             })
         st.download_button("⬇ Download DC→FC", dc2.to_csv(index=False), "dc_to_fc_plan.csv", "text/csv")
+
+    # ── Generate Location Plan from Schedule ─────────────────
+    st.markdown("---")
+    st.markdown("#### 📍 Generate Location Plan from Schedule")
+    st.caption("Based on the daily schedule above — queries real FC/SFC locations and sorts by area density + location_no within each day.")
+
+    if smry and not df_sched.empty:
+        if st.button("🗂 Generate Daily Location Plans (MySQL)", key="gen_loc_plan", type="primary"):
+            import numpy as _np3
+
+            def _sort_by_area_loc(df_locs, loc_col="location_no"):
+                if df_locs.empty: return df_locs
+                d = df_locs.copy()
+                d["_area"] = d[loc_col].astype(str).str[0]
+                cnt = d.groupby("_area")[loc_col].count().rename("_cnt")
+                d = d.join(cnt, on="_area")
+                d = d.sort_values(["day","_cnt","_area",loc_col], ascending=[True,False,True,True])\
+                     .drop(columns=["_area","_cnt"], errors="ignore").reset_index(drop=True)
+                return d
+
+            # FC→DC: get locations for each day's SKUs
+            fc_skus_by_day = df_sched[df_sched["action"]=="FC_TO_DC"].groupby("day")["item_number"].apply(list).to_dict()
+            dc_skus_by_day = df_sched[df_sched["action"]=="DC_TO_FC"].groupby("day")["item_number"].apply(list).to_dict()
+
+            all_fc_skus = df_sched[df_sched["action"]=="FC_TO_DC"]["item_number"].unique().tolist()
+            all_dc_skus = df_sched[df_sched["action"]=="DC_TO_FC"]["item_number"].unique().tolist()
+
+            with st.spinner(f"Querying {len(all_fc_skus):,} FC + {len(all_dc_skus):,} SFC locations..."):
+                df_fc_raw, fc_err = _load_fc_locations(all_fc_skus) if all_fc_skus else (pd.DataFrame(), None)
+                df_sfc_raw, sfc_err = load_top_sfc_locations(all_dc_skus) if all_dc_skus else (pd.DataFrame(), None)
+
+            if fc_err:   st.error(f"FC location error: {fc_err}")
+            if sfc_err:  st.error(f"SFC location error: {sfc_err}")
+
+            # Build FC→DC location plan with day labels
+            fc_loc_rows = []
+            for day, skus in sorted(fc_skus_by_day.items()):
+                if df_fc_raw is not None and not df_fc_raw.empty:
+                    day_locs = df_fc_raw[df_fc_raw["item_number"].isin(skus)].copy()
+                    day_locs["day"] = day
+                    fc_loc_rows.append(day_locs)
+            fc_loc_plan = pd.concat(fc_loc_rows, ignore_index=True) if fc_loc_rows else pd.DataFrame()
+            if not fc_loc_plan.empty:
+                fc_loc_plan = _sort_by_area_loc(fc_loc_plan)
+
+            # Build DC→FC location plan with day labels
+            dc_loc_rows = []
+            for day, skus in sorted(dc_skus_by_day.items()):
+                if df_sfc_raw is not None and not df_sfc_raw.empty:
+                    day_locs = df_sfc_raw[df_sfc_raw["item_number"].isin(skus)].copy()
+                    day_locs["day"] = day
+                    dc_loc_rows.append(day_locs)
+            dc_loc_plan = pd.concat(dc_loc_rows, ignore_index=True) if dc_loc_rows else pd.DataFrame()
+            if not dc_loc_plan.empty:
+                dc_loc_plan = _sort_by_area_loc(dc_loc_plan)
+
+            st.session_state["gen_fc_loc"] = fc_loc_plan
+            st.session_state["gen_dc_loc"] = dc_loc_plan
+            st.success(f"Generated: FC→DC {len(fc_loc_plan):,} locations  ·  DC→FC {len(dc_loc_plan):,} locations")
+
+    # Display generated plans
+    if "gen_fc_loc" in st.session_state and not st.session_state["gen_fc_loc"].empty:
+        gfc = st.session_state["gen_fc_loc"]
+        st.markdown(f"##### 🔴 FC→DC Location Plan — {len(gfc):,} locations")
+        gf1, gf2, gf3 = st.columns([1,1,1])
+        gf_day = gf1.selectbox("Day", ["ALL"]+[str(d) for d in sorted(gfc["day"].unique())],
+                                key="gf_day", label_visibility="collapsed")
+        gf_sku = gf2.text_input("Filter SKU", "", key="gf_sku", placeholder="item_number...")
+        gf_type = gf3.selectbox("Loc Type", ["ALL","Bin","Stock"], key="gf_type", label_visibility="collapsed")
+        sg = gfc.copy()
+        if gf_day  != "ALL": sg = sg[sg["day"]==int(gf_day)]
+        if gf_sku:           sg = sg[sg["item_number"].str.contains(gf_sku)]
+        if gf_type != "ALL": sg = sg[sg.get("loc_type", pd.Series()).eq(gf_type) if "loc_type" in sg.columns else sg.index.isin([])]
+        fc_disp_cols = ["day","item_number","location_no"]
+        for c in ["loc_type","qty","qty_to_transfer","exp_date","need_minimal_exp"]:
+            if c in sg.columns: fc_disp_cols.append(c)
+        st.dataframe(sg[fc_disp_cols], use_container_width=True, hide_index=True, height=450)
+        st.download_button("⬇ Download FC→DC Location Plan", gfc.to_csv(index=False),
+                           "fc_to_dc_location_plan.csv", "text/csv")
+
+    if "gen_dc_loc" in st.session_state and not st.session_state["gen_dc_loc"].empty:
+        gdc = st.session_state["gen_dc_loc"]
+        st.markdown(f"##### 🟢 DC→FC Location Plan — {len(gdc):,} locations")
+        gd1, gd2, gd3 = st.columns([1,1,1])
+        gd_day = gd1.selectbox("Day", ["ALL"]+[str(d) for d in sorted(gdc["day"].unique())],
+                                key="gd_day", label_visibility="collapsed")
+        gd_sku = gd2.text_input("Filter SKU", "", key="gd_sku", placeholder="item_number...")
+        gd_type = gd3.selectbox("Loc Type", ["ALL","Bin","Stock"], key="gd_type", label_visibility="collapsed")
+        sd = gdc.copy()
+        if gd_day  != "ALL": sd = sd[sd["day"]==int(gd_day)]
+        if gd_sku:           sd = sd[sd["item_number"].str.contains(gd_sku)]
+        if gd_type != "ALL": sd = sd[sd.get("loc_type", pd.Series()).eq(gd_type) if "loc_type" in sd.columns else sd.index.isin([])]
+        dc_disp_cols = ["day","item_number","location_no"]
+        for c in ["loc_type","storage_type","qty","qty_to_transfer"]:
+            if c in sd.columns: dc_disp_cols.append(c)
+        st.dataframe(sd[dc_disp_cols], use_container_width=True, hide_index=True, height=450)
+        st.download_button("⬇ Download DC→FC Location Plan", gdc.to_csv(index=False),
+                           "dc_to_fc_location_plan.csv", "text/csv")
