@@ -113,12 +113,14 @@ def load_inventory():
                    AND wsl.warehouse_number = wsli.warehouse_number
                 JOIN yamibuy_wh.wh_location_size wls
                     ON wls.size_id = wsl.size_id
+                LEFT JOIN yamibuy_im.im_item ii
+                    ON ii.item_number = wsli.item_number
                 WHERE wsli.warehouse_number = '002'
                   AND wit.quantity IS NOT NULL
                   AND wit.quantity != 0
                   AND wsl.location_type IN (3, 4)
                   AND wsl.size_id NOT IN (13, 33)
-                  AND (wsli.item_number LIKE '1%%' OR wsli.item_number LIKE '5%%')
+                  AND IFNULL(ii.business_type, 0) != 8
                 GROUP BY wsli.item_number
                 HAVING fc_qty > 0 OR sfc_qty > 0
             """)
@@ -1098,21 +1100,33 @@ def calc_ideal(df_in, aod_top, ol_top, ol_tail,
 df, DATA_TS = load()
 
 # ── 实时库存覆盖 CSV qty（MySQL 实时）────────────────────────
+# 以库存为主表：库存有的SKU全部保留，销售数据没有的填0
+# 这样 N = 物理货架上有库存的SKU数，而不是被Athena销售数据限制
 df_inv_rt, inv_err = load_inventory()
 if df_inv_rt is not None:
-    df["item_number"] = df["item_number"].astype(str)
+    df["item_number"]     = df["item_number"].astype(str)
     df_inv_rt["item_number"] = df_inv_rt["item_number"].astype(str)
-    # New live load() has no fc_qty/sfc_qty — just merge in inventory directly
+
     if "fc_qty" not in df.columns:
-        df = df.merge(df_inv_rt, on="item_number", how="left")
+        # Athena path: df has no fc_qty yet — use inventory as primary table
+        df = df_inv_rt.merge(df, on="item_number", how="left")
         df["fc_qty"]  = df["fc_qty"].fillna(0)
         df["sfc_qty"] = df["sfc_qty"].fillna(0)
     else:
-        # CSV fallback path: has fc_qty already, override with live
-        df = df.merge(df_inv_rt, on="item_number", how="left", suffixes=("_csv",""))
-        df["fc_qty"]  = df["fc_qty"].fillna(df.get("fc_qty_csv", 0)).fillna(0)
-        df["sfc_qty"] = df["sfc_qty"].fillna(df.get("sfc_qty_csv", 0)).fillna(0)
-        df.drop(columns=["fc_qty_csv","sfc_qty_csv"], errors="ignore", inplace=True)
+        # CSV fallback: override fc_qty/sfc_qty with live inventory
+        df = df_inv_rt.merge(df.drop(columns=["fc_qty","sfc_qty"], errors="ignore"),
+                             on="item_number", how="left")
+        df["fc_qty"]  = df["fc_qty"].fillna(0)
+        df["sfc_qty"] = df["sfc_qty"].fillna(0)
+
+    # Fill missing sales columns with 0 for SKUs not in Athena
+    for col in ["active_order_days","order_lines_30d","avg_daily_orders",
+                "sales_units_30d","unit_volume_cbm"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0
+    INV_TS = "live"
     INV_TS = "live"
 else:
     if "fc_qty" not in df.columns:
