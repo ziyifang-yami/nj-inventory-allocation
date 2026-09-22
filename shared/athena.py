@@ -16,7 +16,7 @@ load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 REGION    = os.getenv("ATHENA_REGION", "us-west-2")
 WORKGROUP = os.getenv("ATHENA_WORK_GROUP", "ziyi.fang")
 S3_BASE   = os.getenv("ATHENA_S3_STAGING",
-                      "s3://aws-athena-query-results-us-west-2-654654218498/")
+                      "s3://yami-athena-query-result/ziyi.fang/")
 
 _client = None
 

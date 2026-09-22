@@ -31,7 +31,7 @@ OUT_DIR.mkdir(exist_ok=True)
 REGION    = "us-west-2"
 WORKGROUP = os.getenv("ATHENA_WORK_GROUP", "ziyi.fang")
 S3_OUT    = os.getenv("ATHENA_S3_STAGING",
-                      "s3://aws-athena-query-results-us-west-2-654654218498/") + "nj-v3-segment/"
+                      "s3://yami-athena-query-result/") + "ziyi.fang/nj-v3-segment/"
 
 session = boto3.Session(profile_name="default")
 athenac = session.client("athena", region_name=REGION)

@@ -76,7 +76,7 @@ COLORS = {
 TARGETS = {"SKU %": 10.2, "OL %": 70.2, "Units %": 77.7, "CBI %": 80.4}
 
 # ── Load ─────────────────────────────────────────────────────
-@st.cache_data(ttl=300)   # 5分钟缓存 — 实时库存
+@st.cache_data(ttl=1800)   # 30分钟缓存 — 实时库存
 def load_inventory():
     """Real-time FC/SFC inventory from MySQL — overwrites CSV qty."""
     import os
@@ -165,7 +165,8 @@ def load_capacity():
                     COUNT(DISTINCT wsl.location_no)            AS total_locs,
                     IFNULL(SUM(wls.volume), 0)                 AS total_volume,
                     IFNULL(SUM(wls.volume * wls.fill_rate), 0) AS allowable_cap,
-                    IFNULL(SUM(inv.sku_vol), 0)                AS used_volume
+                    IFNULL(SUM(inv.sku_vol), 0)                AS used_volume,
+                    COUNT(DISTINCT CASE WHEN inv.sku_vol > 0 THEN wsl.location_no END) AS occupied_locs
                 FROM yamibuy_wh.wh_storage_location wsl
                 LEFT JOIN yamibuy_wh.wh_location_size wls
                     ON wls.size_id = wsl.size_id
@@ -193,21 +194,135 @@ def load_capacity():
         for c in ["allowable_cap", "used_volume"]:
             df_cap[c] = pd.to_numeric(df_cap[c], errors="coerce").fillna(0)
         df_cap["free_volume"] = df_cap["allowable_cap"] - df_cap["used_volume"]
+        df_cap["occupied_locs"] = pd.to_numeric(df_cap["occupied_locs"], errors="coerce").fillna(0).astype(int)
+        df_cap["free_locs"] = (df_cap["total_locs"] - df_cap["occupied_locs"]).clip(lower=0)
         return df_cap, None
     except Exception as e:
         return None, str(e)
 
 @st.cache_data(ttl=3600)
 def load():
-    import glob, re
-    files = sorted(glob.glob("results/segment_sku_detail_*.csv"))
-    if not files:
-        raise FileNotFoundError("No segment_sku_detail_*.csv found")
-    latest = files[-1]
-    df = pd.read_csv(latest)
-    m = re.search(r"(\d{8})_(\d{4})", latest)
-    ts = f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]} {m.group(2)[:2]}:{m.group(2)[2:]}" if m else "unknown"
-    return df, ts
+    """
+    Sales/AOD data from Athena (rolling 30 inv-days) — live on server.
+    Falls back to latest CSV if Athena unavailable.
+    """
+    import glob, re, os, time, boto3
+    try:
+        _load_env()
+        # Use AWS_PROFILE env var if set, otherwise try 'athena-prod' (EC2 role, no expiry)
+        # then 'prod' (SSO, requires periodic login), then 'default'
+        aws_profile = os.getenv("AWS_PROFILE")
+        if not aws_profile:
+            import configparser
+            aws_config = configparser.ConfigParser()
+            aws_config.read(os.path.expanduser("~/.aws/config"))
+            sections = aws_config.sections()
+            if any(s in ("profile athena-prod", "athena-prod") for s in sections):
+                aws_profile = "athena-prod"
+            elif any(s in ("profile prod", "prod") for s in sections):
+                aws_profile = "prod"
+            else:
+                aws_profile = "default"
+        session = boto3.Session(profile_name=aws_profile)
+        athenac = session.client("athena", region_name="us-west-2")
+        workgroup = os.getenv("ATHENA_WORK_GROUP", "aiagent")
+        s3_out    = os.getenv("ATHENA_S3_STAGING",
+                              "s3://yami-athena-query-result/") + "aiagent/nj-v3-segment/"
+
+        SQL_SALES = """
+        WITH inv_days AS (
+            SELECT item_number, dt AS inv_date,
+                   ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY dt DESC) AS rn
+            FROM yamibuy_inventory.inventory_record
+            WHERE warehouse_number = '002'
+              AND virtual_qty = 0
+              AND available_qty > 0
+              AND (item_number LIKE '1%' OR item_number LIKE '5%')
+        ),
+        inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
+        sales AS (
+            SELECT item_number, day_id,
+                   SUM(orders) AS daily_orders,
+                   SUM(sales)  AS daily_sales
+            FROM dwb_trade.trade_item_sale_agg_daily
+            WHERE warehouse_number = '002' AND orders > 0
+              AND (item_number LIKE '1%' OR item_number LIKE '5%')
+            GROUP BY item_number, day_id
+        )
+        SELECT
+            i.item_number,
+            COUNT(DISTINCT i.inv_date)                            AS inv_days_30,
+            COUNT(DISTINCT s.day_id)                              AS active_order_days,
+            COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE), 0)      AS order_lines_30d,
+            COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE)/30.0, 0) AS avg_daily_orders,
+            COALESCE(SUM(s.daily_sales), 0)                       AS sales_units_30d
+        FROM inv_30 i
+        LEFT JOIN sales s ON s.item_number = i.item_number AND s.day_id = i.inv_date
+        GROUP BY i.item_number
+        """
+
+        resp = athenac.start_query_execution(
+            QueryString=SQL_SALES,
+            QueryExecutionContext={"Database": "yamibuy_inventory"},
+            WorkGroup=workgroup,
+            ResultConfiguration={"OutputLocation": s3_out},
+        )
+        qid = resp["QueryExecutionId"]
+        for _ in range(150):  # up to 5 min
+            st_val = athenac.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"]["State"]
+            if st_val == "SUCCEEDED": break
+            if st_val in ("FAILED","CANCELLED"):
+                reason = athenac.get_query_execution(QueryExecutionId=qid)["QueryExecution"]["Status"].get("StateChangeReason","no reason")
+                raise RuntimeError(f"Athena {st_val}: {reason}")
+            time.sleep(2)
+        else:
+            raise TimeoutError("Athena timeout")
+
+        rows_all = []
+        for page in athenac.get_paginator("get_query_results").paginate(QueryExecutionId=qid):
+            rows_all.extend(page["ResultSet"]["Rows"])
+        cols = [c["VarCharValue"] for c in rows_all[0]["Data"]]
+        data = [[c.get("VarCharValue","") for c in r["Data"]] for r in rows_all[1:]]
+        df_sales = pd.DataFrame(data, columns=cols)
+        for c in ["inv_days_30","active_order_days","order_lines_30d","avg_daily_orders","sales_units_30d"]:
+            df_sales[c] = pd.to_numeric(df_sales[c], errors="coerce").fillna(0)
+
+        # unit volume from MySQL
+        import pymysql
+        conn = pymysql.connect(
+            host=os.getenv("MYSQL_HOST"), user=os.getenv("MYSQL_USER"),
+            password=os.getenv("MYSQL_PASS"), port=3306, charset="utf8mb4", connect_timeout=8,
+        )
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT i.item_number, wwg.volume AS unit_volume_cbm
+                FROM yamibuy_im.im_item i
+                JOIN yamibuy_master.xysc_wearhouse_goods wwg ON i.goods_id = wwg.goods_id
+                WHERE (i.item_number LIKE '1%' OR i.item_number LIKE '5%') AND wwg.volume > 0
+            """)
+            vol_rows = cur.fetchall()
+        conn.close()
+        df_vol = pd.DataFrame(vol_rows, columns=["item_number","unit_volume_cbm"])
+        df_vol["unit_volume_cbm"] = pd.to_numeric(df_vol["unit_volume_cbm"], errors="coerce").fillna(0)
+
+        df = df_sales.merge(df_vol, on="item_number", how="left")
+        df["unit_volume_cbm"] = df["unit_volume_cbm"].fillna(0)
+        df["avg_daily_sales"] = df["sales_units_30d"] / 30
+        df["daily_sales_cbm"] = df["avg_daily_sales"] * df["unit_volume_cbm"]
+        ts = "live (Athena)"
+        return df, ts
+
+    except Exception as e:
+        # fallback to latest CSV
+        files = sorted(glob.glob("results/segment_sku_detail_*.csv"))
+        if not files:
+            raise FileNotFoundError(f"Athena failed ({e}) and no CSV fallback found")
+        latest = files[-1]
+        df = pd.read_csv(latest)
+        m = re.search(r"(\d{8})_(\d{4})", latest)
+        ts = (f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]} "
+              f"{m.group(2)[:2]}:{m.group(2)[2:]} [CSV fallback, Athena: {e}]") if m else f"CSV fallback ({e})"
+        return df, ts
 
 def load_middle_locations(skus):
     """Real-time: fetch FC lot data for MIDDLE FC→DC SKUs from MySQL."""
@@ -216,6 +331,63 @@ def load_middle_locations(skus):
 def load_tail_locations(skus):
     """Real-time: fetch FC location data for TAIL SKUs (full clear)."""
     return _load_fc_locations(skus)
+
+@st.cache_data(ttl=1800)
+def load_sku_loc_stats(skus):
+    """
+    Real-time: for each SKU, get total FC volume (qty×unit_vol) and occupied FC location count.
+    Used for priority sorting in run_planning.
+    Works for both TAIL (full clear) and MIDDLE evict SKUs.
+    """
+    import os
+    from pathlib import Path
+    if not skus:
+        return pd.DataFrame(columns=["item_number","total_vol","loc_count"])
+    try:
+        _load_env()
+        import pymysql
+        conn = pymysql.connect(
+            host=os.getenv("MYSQL_HOST"), user=os.getenv("MYSQL_USER"),
+            password=os.getenv("MYSQL_PASS"), port=3306, charset="utf8mb4",
+            connect_timeout=8,
+        )
+        SQL = """
+            SELECT
+                li.item_number,
+                COUNT(DISTINCT li.location_no)              AS loc_count,
+                SUM(li.quantity * COALESCE(wwg.volume, 0))  AS total_vol
+            FROM yamibuy_wh.wh_lot_inventory li
+            JOIN yamibuy_wh.wh_storage_location wsl
+                ON wsl.location_no = li.location_no AND wsl.warehouse_number = li.warehouse_number
+            LEFT JOIN yamibuy_im.im_item ii ON ii.item_number = li.item_number
+            LEFT JOIN yamibuy_master.xysc_wearhouse_goods wwg ON wwg.goods_id = ii.goods_id
+            WHERE li.warehouse_number = '002'
+              AND li.quantity > 0
+              AND wsl.location_type IN (3, 4)
+              AND wsl.size_id NOT IN (13, 33)
+              AND (li.location_no NOT LIKE 'S%%'
+               AND li.location_no NOT LIKE 'DC%%'
+               AND li.location_no NOT LIKE 'K%%')
+              AND li.item_number IN ({ph})
+            GROUP BY li.item_number
+        """
+        all_rows, all_cols = [], None
+        chunks = [skus[i:i+500] for i in range(0, len(skus), 500)]
+        with conn.cursor() as cur:
+            for chunk in chunks:
+                ph = ",".join(["%s"]*len(chunk))
+                cur.execute(SQL.format(ph=ph), chunk)
+                if all_cols is None:
+                    all_cols = [d[0] for d in cur.description]
+                all_rows.extend(cur.fetchall())
+        conn.close()
+        df = pd.DataFrame(all_rows, columns=all_cols)
+        df["item_number"] = df["item_number"].astype(str)
+        df["loc_count"]   = pd.to_numeric(df["loc_count"], errors="coerce").fillna(0).astype(int)
+        df["total_vol"]   = pd.to_numeric(df["total_vol"], errors="coerce").fillna(0)
+        return df
+    except Exception:
+        return pd.DataFrame(columns=["item_number","loc_count","total_vol"])
 
 def _load_fc_locations(skus):
     """Shared: fetch FC lot/location data for given SKU list."""
@@ -538,73 +710,228 @@ def run_planning(df_in, p):
     start = date.today()
     records = []
 
-    idx_in  = 0
-    idx_out = 0
-    n_in    = len(df_in_)
-    n_out   = len(df_out_)
+    # Split by tier for 2-pass daily pool: tier-1 first, fill remaining with tier-2
+    # ── Unified FC→DC list: TAIL + MIDDLE evict merged, sorted by vol desc ──
+    # TAIL gets priority over MIDDLE at same vol (tier_rank 0 < 1)
+    out_t1 = df_out_[df_out_["seg"]=="TAIL"].copy()
+    out_t2 = df_out_[df_out_["seg"]=="MIDDLE"].copy()
+    in_t1  = df_in_[df_in_["seg"]=="TOP"].reset_index(drop=True)
+    in_t2  = df_in_[df_in_["seg"]=="MIDDLE"].reset_index(drop=True)
+
+    out_t1["_tier_rank"] = 0
+    out_t2["_tier_rank"] = 1
+    out_all = pd.concat([out_t1, out_t2], ignore_index=True)
+
+    sku_stats = p.get("tail_stats")
+    if sku_stats is not None and not sku_stats.empty:
+        out_all = out_all.merge(sku_stats[["item_number","total_vol","loc_count"]],
+                                on="item_number", how="left")
+        out_all["total_vol"] = out_all["total_vol"].fillna(out_all["transfer_vol"])
+        out_all["loc_count"] = out_all["loc_count"].fillna(1)
+        # TAIL always before MIDDLE; within each tier, vol desc then loc_count desc
+        out_all = out_all.sort_values(["_tier_rank","total_vol","loc_count"],
+                                      ascending=[True, False, False])
+        out_all = out_all.drop(columns=["total_vol","loc_count"], errors="ignore")
+    else:
+        # Fallback: TAIL before MIDDLE, vol desc within tier
+        out_all = out_all.sort_values(["_tier_rank","transfer_vol"],
+                                      ascending=[True, False])
+    out_all = out_all.drop(columns=["_tier_rank"], errors="ignore").reset_index(drop=True)
+
+    # Pre-sort out_t2 by vol desc (same as sku_stats sort, ensures sequential idx works)
+    if sku_stats is not None and not sku_stats.empty:
+        _m = out_t2.merge(sku_stats[["item_number","total_vol"]], on="item_number", how="left")
+        _m["total_vol"] = _m["total_vol"].fillna(_m["transfer_vol"])
+        out_t2 = _m.sort_values("total_vol", ascending=False)\
+                   .drop(columns=["total_vol"], errors="ignore")\
+                   .reset_index(drop=True)
+    else:
+        out_t2 = out_t2.sort_values("transfer_vol", ascending=False).reset_index(drop=True)
+    n_out2 = len(out_t2)
+    n_out1, n_out2 = len(out_t1), len(out_t2)
+    n_in1,  n_in2  = len(in_t1),  len(in_t2)
+    n_in  = n_in1 + n_in2
+    n_out = n_out1 + n_out2
+
+    idx_out1 = idx_out2 = 0
+    idx_in1  = idx_in2  = 0
 
     PALLET_VOL = 48 * 40 * 72 * 0.8  # 6ft pallet usable volume in³ = 110,592
 
-    cum_vol_out = 0.0  # cumulative FC→DC volume released
-    cum_vol_in  = 0.0  # cumulative DC→FC volume moved in
+    cum_vol_out  = 0.0
+    cum_vol_in   = 0.0
+    cum_sku_in   = 0
+    cum_locs_out = 0
+    fc_free_locs = p.get("fc_free_locs", 999999)
+    surplus_vol  = 0.0  # vol balance carryover: today's excess (out-in) rolls to tomorrow
+    surplus_locs = 0    # locs balance carryover
+    swap_log     = []   # per-day swap diagnostics
+
+    # ── Daily balance only: DC→FC ≤ FC→DC each day ───────────
+    # No need to track current FC state — only focus on in/out balance per day
+
+    def _fill_batch(src, idx, cap_sku, pallet_cap):
+        """Fill one tier. Returns (batch_indices, new_idx, skus_added, pals_added)."""
+        batch, sku_cnt, pal_cnt = [], 0, 0.0
+        i = idx
+        while i < len(src) and sku_cnt < cap_sku:
+            row = src.iloc[i]
+            row_pal = np.ceil(row["transfer_vol"] / PALLET_VOL)
+            if pal_cnt + row_pal <= pallet_cap:
+                batch.append(i)
+                sku_cnt += 1
+                pal_cnt += row_pal
+            i += 1
+        return batch, i, sku_cnt, pal_cnt
+
+    def _fill_batch_capped(src, idx, cap_sku, pallet_cap, day_budget, base_added=0):
+        """Fill one tier, additionally bounded by day_budget (remaining slots)."""
+        batch, sku_cnt, pal_cnt = [], 0, 0.0
+        i = idx
+        while i < len(src) and sku_cnt < cap_sku and (base_added + sku_cnt) < day_budget:
+            row = src.iloc[i]
+            row_pal = np.ceil(row["transfer_vol"] / PALLET_VOL)
+            if pal_cnt + row_pal <= pallet_cap:
+                batch.append(i)
+                sku_cnt += 1
+                pal_cnt += row_pal
+            i += 1
+        return batch, i, sku_cnt, pal_cnt
 
     for day in range(1, p["plan_days"] + 1):
         dt = str(start + timedelta(days=day - 1))
-
-        # ── Group A: workers_out handle FC→DC independently ──
-        # TAIL first (1000-1999), then MIDDLE FC→DC (2000-2999)
         pallet_cap_out = p.get("daily_pallet_cap_out", float("inf"))
-        sku_out = 0
-        pal_out = 0.0
-        batch_out_idx = []
-        i = idx_out
-        while i < n_out and sku_out < p["daily_cap_out"]:
-            row = df_out_.iloc[i]
-            row_pal = np.ceil(row["transfer_vol"] / PALLET_VOL)
-            if pal_out + row_pal <= pallet_cap_out:
-                batch_out_idx.append(i)
-                sku_out += 1
-                pal_out += row_pal
-                cum_vol_out += row["transfer_vol"]
-            i += 1
-        idx_out = i
+        pallet_cap_in  = p.get("daily_pallet_cap_in",  float("inf"))
+        cap_out = p["daily_cap_out"]
+        cap_in  = p["daily_cap_in"]
 
-        # ── Group B: workers_in handle DC→FC independently ───
-        # TOP first (1000-1999): NO balance constraint — locations already verified sufficient
-        # MIDDLE DC→FC (2000-2999): cumulative volume balance applies
-        pallet_cap_in = p.get("daily_pallet_cap_in", float("inf"))
-        sku_in = 0
-        pal_in = 0.0
-        batch_in_idx = []
-        j = idx_in
-        while j < n_in and sku_in < p["daily_cap_in"]:
-            row = df_in_.iloc[j]
-            row_pal = np.ceil(row["transfer_vol"] / PALLET_VOL)
-            is_top = row["seg"] == "TOP"
-            # TOP: unrestricted (location balance pre-verified: 11,958 released >> 725 needed)
-            # MIDDLE: needs cumulative volume balance
-            balance_ok = is_top or (cum_vol_in + row["transfer_vol"] <= cum_vol_out)
-            if pal_in + row_pal <= pallet_cap_in and balance_ok:
-                batch_in_idx.append(j)
-                sku_in += 1
-                pal_in += row_pal
-                cum_vol_in += row["transfer_vol"]
+        # ── Step 1: Determine TOP demand today (unrestricted) ──
+        top_today_n  = min(cap_in, n_in1 - idx_in1)
+        top_vol_need = sum(in_t1.iloc[idx_in1 + k]["transfer_vol"]
+                           for k in range(top_today_n))
+
+        # ── Step 2: DC→FC first (determines locs/vol needed from FC→DC) ──
+        # Fill cap_in: TOP first, then MIDDLE
+        day_vol_in = 0.0
+        day_locs_in = 0
+
+        b_in1, s3, p3 = [], 0, 0.0
+        j = idx_in1
+        while j < n_in1 and s3 < cap_in:
+            row = in_t1.iloc[j]
+            rp  = np.ceil(row["transfer_vol"] / PALLET_VOL)
+            if p3 + rp <= pallet_cap_in:
+                b_in1.append(j)
+                s3 += 1; p3 += rp
+                day_vol_in  += row["transfer_vol"]
+                day_locs_in += 1
             j += 1
-        idx_in = j
+        idx_in1 = j
 
-        for act, idx_list, src_df in [
-            ("FC_TO_DC", batch_out_idx, df_out_),
-            ("DC_TO_FC", batch_in_idx,  df_in_),
+        b_in2, s4, p4 = [], 0, 0.0
+        j = idx_in2
+        while j < n_in2 and (s3 + s4) < cap_in:
+            row = in_t2.iloc[j]
+            rp  = np.ceil(row["transfer_vol"] / PALLET_VOL)
+            if p3 + p4 + rp <= pallet_cap_in:
+                b_in2.append(j)
+                s4 += 1; p4 += rp
+                day_vol_in  += row["transfer_vol"]
+                day_locs_in += 1
+            j += 1
+        idx_in2 = j
+
+        # ── Step 3: FC→DC — greedy to balance DC→FC, then fill remaining cap ──
+        # Must ensure locs_out ≥ locs_in AND vol_out ≥ vol_in
+        # Use TAIL+MIDDLE merge (already sequential sorted by vol desc)
+        need_locs = day_locs_in  # at minimum, must release this many locs
+        need_vol  = day_vol_in   # at minimum, must release this much vol
+
+        b_out1, b_out2 = [], []
+        s1, s2 = 0, 0
+        day_vol_out1, day_vol_out2 = 0.0, 0.0
+        tail_ptr = idx_out1
+        mid_ptr  = idx_out2
+        cum_out  = 0.0
+        cum_lout = 0
+
+        while (s1 + s2) < cap_out:
+            next_tail_vol = out_t1.iloc[tail_ptr]["transfer_vol"] if tail_ptr < n_out1 else -1
+            next_mid_vol  = out_t2.iloc[mid_ptr]["transfer_vol"]  if mid_ptr  < n_out2 else -1
+
+            # If we still need to satisfy the DC→FC balance, use greedy (vol desc merge)
+            still_need = cum_out < need_vol - 1e-6 or cum_lout < need_locs
+            if still_need and next_mid_vol >= next_tail_vol and mid_ptr < n_out2:
+                b_out2.append(mid_ptr)
+                s2 += 1
+                day_vol_out2 += out_t2.iloc[mid_ptr]["transfer_vol"]
+                cum_out  += out_t2.iloc[mid_ptr]["transfer_vol"]
+                cum_lout += 1
+                mid_ptr += 1
+            elif tail_ptr < n_out1:
+                b_out1.append(tail_ptr)
+                s1 += 1
+                day_vol_out1 += out_t1.iloc[tail_ptr]["transfer_vol"]
+                cum_out  += out_t1.iloc[tail_ptr]["transfer_vol"]
+                cum_lout += 1
+                tail_ptr += 1
+            elif mid_ptr < n_out2:
+                b_out2.append(mid_ptr)
+                s2 += 1
+                day_vol_out2 += out_t2.iloc[mid_ptr]["transfer_vol"]
+                cum_out  += out_t2.iloc[mid_ptr]["transfer_vol"]
+                cum_lout += 1
+                mid_ptr += 1
+            else:
+                break
+
+        idx_out1 = tail_ptr
+        idx_out2 = mid_ptr
+
+        today_out_rows = sorted(
+            [out_t1.iloc[i] for i in b_out1] + [out_t2.iloc[i] for i in b_out2],
+            key=lambda r: r["transfer_vol"], reverse=True
+        )
+        cum_vol_out  += day_vol_out1 + day_vol_out2
+        cum_locs_out += s1 + s2
+        s_out = s1 + s2
+        day_locs_released = s_out
+        day_vol_released  = day_vol_out1 + day_vol_out2
+
+        cum_sku_in  += s3 + s4
+        cum_vol_in  += day_vol_in
+
+        # ── Record — FC→DC sorted by vol desc, DC→FC as-is ──────
+        if today_out_rows:
+            tmp_out = pd.DataFrame(today_out_rows)[
+                ["item_number","seg","transfer_qty","transfer_vol","priority"]]
+            tmp_out["day"]     = day
+            tmp_out["date"]    = dt
+            tmp_out["action"]  = "FC_TO_DC"
+            tmp_out["pallets"] = np.ceil(tmp_out["transfer_vol"] / PALLET_VOL).astype(int)
+            records.append(tmp_out)
+
+        for act, src, batch in [
+            ("DC_TO_FC", in_t1, b_in1),
+            ("DC_TO_FC", in_t2, b_in2),
         ]:
-            if idx_list:
-                tmp = src_df.iloc[idx_list][["item_number","seg","transfer_qty","transfer_vol","priority"]].copy()
+            if batch:
+                tmp = src.iloc[batch][["item_number","seg","transfer_qty","transfer_vol","priority"]].copy()
                 tmp["day"]     = day
                 tmp["date"]    = dt
                 tmp["action"]  = act
                 tmp["pallets"] = np.ceil(tmp["transfer_vol"] / PALLET_VOL).astype(int)
                 records.append(tmp)
 
-        if idx_in >= n_in and idx_out >= n_out:
+        # Swap log
+        swap_log.append({"day": day, "top_n": top_today_n, "tail_out": s1, "mid_out": s2,
+                         "top_in": s3, "mid_in": s4,
+                         "vol_out": round(day_vol_out1+day_vol_out2, 0),
+                         "vol_in": round(day_vol_in, 0),
+                         "surplus_v": round(surplus_vol, 0),
+                         "surplus_l": surplus_locs})
+
+        if idx_out1 >= n_out1 and idx_out2 >= n_out2 and idx_in1 >= n_in1 and idx_in2 >= n_in2:
             break
 
     if not records:
@@ -619,7 +946,6 @@ def run_planning(df_in, p):
         transfer_vol=("transfer_vol", "sum"),
         pallets     =("pallets",      "sum"),
     ).reset_index()
-
     done_in  = int((df_sched["action"]=="DC_TO_FC").sum())
     done_out = int((df_sched["action"]=="FC_TO_DC").sum())
     vol_in   = float(df_sched[df_sched["action"]=="DC_TO_FC"]["transfer_vol"].sum())
@@ -630,10 +956,16 @@ def run_planning(df_in, p):
         total_in=n_in,   done_in=done_in,   pct_in=done_in/max(n_in,1)*100,
         total_out=n_out, done_out=done_out, pct_out=done_out/max(n_out,1)*100,
         vol_in=vol_in, vol_out=vol_out,
-        vol_balance=vol_out - vol_in,  # positive = more released than moved in (good)
+        vol_balance=vol_out - vol_in,
         total_pallets=total_p,
         pallets_per_day=total_p / p["plan_days"],
         rem_in=n_in - done_in, rem_out=n_out - done_out,
+        fc_free_locs_initial=p.get("fc_free_locs", 0),
+        locs_freed=done_out,
+        locs_consumed=done_in,
+        locs_net=p.get("fc_free_locs", 0) + done_out - done_in,
+        swap_log=swap_log,
+        n_in2=n_in2,
     )
     return df_sched, daily, summary
 
@@ -762,13 +1094,23 @@ df_inv_rt, inv_err = load_inventory()
 if df_inv_rt is not None:
     df["item_number"] = df["item_number"].astype(str)
     df_inv_rt["item_number"] = df_inv_rt["item_number"].astype(str)
-    df = df.merge(df_inv_rt, on="item_number", how="left", suffixes=("_csv",""))
-    df["fc_qty"]  = df["fc_qty"].fillna(df["fc_qty_csv"]).fillna(0)
-    df["sfc_qty"] = df["sfc_qty"].fillna(df["sfc_qty_csv"]).fillna(0)
-    df.drop(columns=["fc_qty_csv","sfc_qty_csv"], errors="ignore", inplace=True)
+    # New live load() has no fc_qty/sfc_qty — just merge in inventory directly
+    if "fc_qty" not in df.columns:
+        df = df.merge(df_inv_rt, on="item_number", how="left")
+        df["fc_qty"]  = df["fc_qty"].fillna(0)
+        df["sfc_qty"] = df["sfc_qty"].fillna(0)
+    else:
+        # CSV fallback path: has fc_qty already, override with live
+        df = df.merge(df_inv_rt, on="item_number", how="left", suffixes=("_csv",""))
+        df["fc_qty"]  = df["fc_qty"].fillna(df.get("fc_qty_csv", 0)).fillna(0)
+        df["sfc_qty"] = df["sfc_qty"].fillna(df.get("sfc_qty_csv", 0)).fillna(0)
+        df.drop(columns=["fc_qty_csv","sfc_qty_csv"], errors="ignore", inplace=True)
     INV_TS = "live"
 else:
-    INV_TS = f"CSV only ({DATA_TS})"  # fallback to CSV if MySQL unavailable
+    if "fc_qty" not in df.columns:
+        df["fc_qty"]  = 0
+        df["sfc_qty"] = 0
+    INV_TS = f"CSV only ({DATA_TS})"
 
 # 分母在过滤后重算，这里先占位
 N   = 0
@@ -1038,12 +1380,47 @@ with page_overview:
 # ── Zone View Tab ─────────────────────────────────────────────
 with page_zone:
 
-    @st.cache_data
+    @st.cache_data(ttl=1800)
     def load_zone():
-        zdf = pd.read_csv("results/zone_inventory.csv")
-        zdf["qty"]         = pd.to_numeric(zdf["qty"],          errors="coerce").fillna(0)
-        zdf["unit_volume_cbi"] = pd.to_numeric(zdf["unit_volume_cbm"], errors="coerce").fillna(0)
-        zdf["total_volume"]= zdf["qty"] * zdf["unit_volume_cbi"]
+        """Real-time zone inventory from MySQL (replaces zone_inventory.csv)."""
+        import os, pymysql
+        try:
+            _load_env()
+            conn = pymysql.connect(
+                host=os.getenv("MYSQL_HOST"), user=os.getenv("MYSQL_USER"),
+                password=os.getenv("MYSQL_PASS"), port=3306, charset="utf8mb4", connect_timeout=8,
+            )
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT
+                        wit.item_number,
+                        CASE WHEN wsl.zone_id = 2 THEN 'SFC' ELSE 'FC' END AS zone,
+                        wit.location_no,
+                        wsl.location_type,
+                        wit.quantity AS qty,
+                        COALESCE(wwg.volume, 0) AS unit_volume_cbm
+                    FROM yamibuy_wh.wh_inventory_transaction wit
+                    JOIN yamibuy_wh.wh_storage_location wsl
+                        ON wsl.location_no = wit.location_no
+                       AND wsl.warehouse_number = wit.warehouse_number
+                    LEFT JOIN yamibuy_im.im_item ii ON ii.item_number = wit.item_number
+                    LEFT JOIN yamibuy_master.xysc_wearhouse_goods wwg ON wwg.goods_id = ii.goods_id
+                    WHERE wit.warehouse_number = '002'
+                      AND wit.quantity > 0
+                      AND wsl.location_type IN (3, 4)
+                      AND wsl.zone_id IN (1, 2)
+                      AND (wit.item_number LIKE '1%%' OR wit.item_number LIKE '5%%')
+                """)
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+            conn.close()
+            zdf = pd.DataFrame(rows, columns=cols)
+        except Exception:
+            # fallback to CSV if MySQL fails
+            zdf = pd.read_csv("results/zone_inventory.csv")
+        zdf["qty"]             = pd.to_numeric(zdf["qty"],             errors="coerce").fillna(0)
+        zdf["unit_volume_cbm"] = pd.to_numeric(zdf["unit_volume_cbm"], errors="coerce").fillna(0)
+        zdf["total_volume"]    = zdf["qty"] * zdf["unit_volume_cbm"]
         return zdf
 
     zdf = load_zone()
@@ -1065,10 +1442,12 @@ with page_zone:
     overlap  = len(set(fc_df["item_number"]) & set(sfc_df["item_number"]))
 
     zc1, zc2, zc3 = st.columns(3)
-    zc1.metric("FC (Zone 1) SKUs",  f"{fc_skus}",  f"{fc_df['qty'].sum():,.0f} units")
-    zc2.metric("SFC (Zone 2) SKUs", f"{sfc_skus}", f"{sfc_df['qty'].sum():,.0f} units")
-    zc3.metric("Overlap (both zones)", f"{overlap} SKUs",
-               f"{overlap/max(fc_skus,1)*100:.1f}% of FC SKUs")
+    zc1.metric("FC (Zone 1) SKUs",  f"{fc_skus:,}",
+               help=f"Includes {overlap:,} overlap SKUs. Total qty: {fc_df['qty'].sum():,.0f} units")
+    zc2.metric("SFC (Zone 2) SKUs", f"{sfc_skus:,}",
+               help=f"Includes {overlap:,} overlap SKUs. Total qty: {sfc_df['qty'].sum():,.0f} units")
+    zc3.metric("Overlap (both zones)", f"{overlap:,} SKUs",
+               help=f"{overlap/max(fc_skus,1)*100:.1f}% of FC SKUs — these SKUs have stock in both FC and SFC")
 
     st.divider()
 
@@ -1088,12 +1467,17 @@ with page_zone:
     summary_sfc = zone_seg_summary(sfc_df, "SFC")
     z_summary   = pd.concat([summary_fc, summary_sfc]).sort_values(["zone","seg"])
 
+    TIER_ORDER = ["TOP", "MIDDLE", "TAIL", "UNMATCHED"]
+    z_summary["seg"] = pd.Categorical(z_summary["seg"], categories=TIER_ORDER, ordered=True)
+    z_summary = z_summary.sort_values(["seg","zone"])
+
     za, zb = st.columns(2)
     with za:
         fig_zsku = px.bar(
             z_summary, x="seg", y="sku_count", color="zone", barmode="group",
             color_discrete_map={"FC": "#5B8DEF", "SFC": "#34C4A4"},
             title="SKU Count by Tier", labels={"sku_count": "SKUs", "seg": "Tier"},
+            category_orders={"seg": TIER_ORDER},
         )
         fig_zsku.update_layout(height=280, margin=dict(t=35,b=0,l=0,r=0),
                                legend=dict(orientation="h", x=1, xanchor="right", y=1.1))
@@ -1104,6 +1488,7 @@ with page_zone:
             z_summary, x="seg", y="total_vol", color="zone", barmode="group",
             color_discrete_map={"FC": "#5B8DEF", "SFC": "#34C4A4"},
             title="Total Volume (in³) by Tier", labels={"total_vol": "in³", "seg": "Tier"},
+            category_orders={"seg": TIER_ORDER},
         )
         fig_zvol.update_layout(height=280, margin=dict(t=35,b=0,l=0,r=0),
                                 legend=dict(orientation="h", x=1, xanchor="right", y=1.1))
@@ -1116,7 +1501,9 @@ with page_zone:
         aggfunc="sum", fill_value=0
     ).round(0).astype(int)
     pivot.columns = [f"{v} ({z})" for v, z in pivot.columns]
-    st.dataframe(pivot.reset_index().rename(columns={"seg":"Tier"}),
+    # reindex to keep TOP → MIDDLE → TAIL → UNMATCHED order
+    tier_idx = [t for t in TIER_ORDER if t in pivot.index]
+    st.dataframe(pivot.reindex(tier_idx).reset_index().rename(columns={"seg":"Tier"}),
                  use_container_width=True, hide_index=True)
 
     st.divider()
@@ -1199,12 +1586,18 @@ with page_zone:
 
 # ── Before vs After Tab ───────────────────────────────────────
 with page_compare:
-    # ── 动态计算理想状态（实时 sidebar 阈值，无 cap）─────────
+    # ── 动态计算理想状态（实时 sidebar 阈值 + Planning D2S 参数）─────────
+    # Read Planning D2S params from session_state (set by Planning tab sliders)
+    _top_trig   = st.session_state.get("p_top_trig",   28)
+    _top_target = st.session_state.get("p_top_target", 28)
+    _mid_rout   = st.session_state.get("p_mid_rout",   28)
+    _mid_evict  = st.session_state.get("p_mid_evict",  30)
+    _mid_target = st.session_state.get("p_mid_target", 28)
     df_ideal = calc_ideal(
         df, aod_top, ol_top, ol_tail,
-        top_trigger=28, top_target=28,
-        mid_routine=28, mid_emergency=14,
-        mid_evict=30, mid_target=28,
+        top_trigger=_top_trig,   top_target=_top_target,
+        mid_routine=_mid_rout,   mid_emergency=14,
+        mid_evict=_mid_evict,    mid_target=_mid_target,
     )
     # df 已经是有库存全量，calc_ideal 输出行数与 Overview 完全一致
 
@@ -1284,48 +1677,109 @@ with page_compare:
             "</svg>"
         )
 
-    ois_rows = [
-        ("SKUs",   fc_sku_b, fc_sku_a, sfc_sku_b, sfc_sku_a, _fmt_sku),
-        ("Qty",    fc_now,   fc_after, sfc_now,   sfc_after,  _fmt_qty),
-        ("Volume", fc_vol_b, fc_vol_a, sfc_vol_b, sfc_vol_a,  _fmt_vol),
+    # FC→SFC (out): TAIL + MIDDLE evict
+    # SFC→FC (in):  TOP + MIDDLE replenish
+    dc_to_fc = df_ideal[df_ideal["action"]=="DC_TO_FC"]
+    fc_to_dc = df_ideal[df_ideal["action"]=="FC_TO_DC"]
+
+    out_qty = int(fc_to_dc["transfer_qty"].sum())
+    out_sku = len(fc_to_dc)
+    out_vol = float(fc_to_dc["fc_vol_now"].sum() - fc_to_dc["fc_vol_ideal"].sum())
+
+    in_qty  = int(dc_to_fc["transfer_qty"].sum())
+    in_sku  = len(dc_to_fc)
+    in_vol  = float(dc_to_fc["fc_vol_ideal"].sum() - dc_to_fc["fc_vol_now"].sum())
+
+    st.markdown("""
+    <style>
+    @keyframes flow-r { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -30; } }
+    @keyframes flow-l { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -30; } }
+    .ois2 { border-radius:16px; border:1.5px solid #e8eaf0; padding:28px 36px;
+            background:#fff; box-shadow:0 2px 12px rgba(0,0,0,.05); }
+    .ois2-hdr { display:flex; align-items:center; padding-bottom:14px;
+                border-bottom:2px solid #f0f0f0; margin-bottom:4px; }
+    .ois2-row { display:flex; align-items:center; padding:18px 0;
+                border-bottom:1px solid #f4f4f4; }
+    .ois2-row:last-child { border-bottom:none; }
+    .ois2-dim { width:80px; font-size:.82rem; font-weight:700; color:#bbb;
+                text-transform:uppercase; letter-spacing:.07em; }
+    .ois2-zone { flex:1; text-align:center; }
+    .ois2-b { font-size:.9rem; font-weight:400; color:#ccc; }
+    .ois2-a { font-size:1.8rem; font-weight:800; color:#222; line-height:1.1; margin-top:2px; }
+    .ois2-mid { width:260px; display:flex; flex-direction:column;
+                align-items:center; gap:6px; }
+    .ois2-arrow-row { display:flex; align-items:center; gap:8px; width:100%; }
+    .ois2-badge-red  { font-size:.85rem; font-weight:700; background:#fde8e8;
+                       color:#e74c3c; border-radius:99px; padding:3px 12px;
+                       white-space:nowrap; flex-shrink:0; }
+    .ois2-badge-grn  { font-size:.85rem; font-weight:700; background:#e8f8f0;
+                       color:#27ae60; border-radius:99px; padding:3px 12px;
+                       white-space:nowrap; flex-shrink:0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    def _arr_r(label):   # FC → SFC (left to right, red), qty on top
+        return (
+            f"<div style='display:flex;flex-direction:column;align-items:center;gap:2px;width:100%'>"
+            f"  <span style='font-size:.85rem;font-weight:700;color:#e74c3c'>{label}</span>"
+            f"  <svg width='200' height='16' viewBox='0 0 200 16' xmlns='http://www.w3.org/2000/svg'>"
+            f"  <defs><marker id='mr' markerWidth='6' markerHeight='6' refX='3' refY='3' orient='auto'>"
+            f"  <path d='M0,0 L6,3 L0,6 Z' fill='#e74c3c'/></marker></defs>"
+            f"  <line x1='2' y1='8' x2='188' y2='8' stroke='#e74c3c' stroke-width='2.5' "
+            f"  stroke-dasharray='10,5' marker-end='url(#mr)' style='animation:flow-r 0.9s linear infinite'/>"
+            f"  </svg>"
+            f"</div>"
+        )
+
+    def _arr_l(label):   # SFC → FC (right to left, green), qty on top
+        return (
+            f"<div style='display:flex;flex-direction:column;align-items:center;gap:2px;width:100%'>"
+            f"  <span style='font-size:.85rem;font-weight:700;color:#27ae60'>{label}</span>"
+            f"  <svg width='200' height='16' viewBox='0 0 200 16' xmlns='http://www.w3.org/2000/svg'>"
+            f"  <defs><marker id='mg' markerWidth='6' markerHeight='6' refX='3' refY='3' orient='auto'>"
+            f"  <path d='M0,0 L6,3 L0,6 Z' fill='#27ae60'/></marker></defs>"
+            f"  <line x1='198' y1='8' x2='12' y2='8' stroke='#27ae60' stroke-width='2.5' "
+            f"  stroke-dasharray='10,5' marker-end='url(#mg)' style='animation:flow-l 0.9s linear infinite'/>"
+            f"  </svg>"
+            f"</div>"
+        )
+
+    rows_data = [
+        ("SKUs",   fc_sku_b, fc_sku_a, out_sku, sfc_sku_b, sfc_sku_a, in_sku, _fmt_sku),
+        ("Qty",    fc_now,   fc_after, out_qty, sfc_now,   sfc_after,  in_qty, _fmt_qty),
+        ("Volume", fc_vol_b, fc_vol_a, out_vol, sfc_vol_b, sfc_vol_a,  in_vol, _fmt_vol),
     ]
 
     hdr = (
-        "<div class='ois-hdr'>"
-        "  <div class='ois-dim'></div>"
-        "  <div class='ois-hcell'>🏭 FC</div>"
-        "  <div class='ois-hcell mid'></div>"
-        "  <div class='ois-hcell'>🏬 SFC</div>"
+        "<div class='ois2-hdr'>"
+        "  <div class='ois2-dim'></div>"
+        "  <div style='flex:1;text-align:center;font-size:1rem;font-weight:700;color:#444'>🏭 FC</div>"
+        "  <div style='width:260px'></div>"
+        "  <div style='flex:1;text-align:center;font-size:1rem;font-weight:700;color:#444'>🏬 SFC</div>"
         "</div>"
     )
 
     body = ""
-    for dim, fb, fa, sb, sa, fmt in ois_rows:
-        fd = fa - fb;  sd = sa - sb
-        xfer = abs(fd)
-        fc_clr  = "#e74c3c" if fd < 0 else "#27ae60" if fd > 0 else "#aaa"
-        sfc_clr = "#27ae60" if sd > 0 else "#e74c3c" if sd < 0 else "#aaa"
-        fc_arr  = "▼" if fd < 0 else "▲" if fd > 0 else "─"
-        sfc_arr = "▲" if sd > 0 else "▼" if sd < 0 else "─"
+    for dim, fc_b, fc_a, out_v, sfc_b, sfc_a, in_v, fmt in rows_data:
         body += (
-            f"<div class='ois-row'>"
-            f"  <div class='ois-dim'>{dim}</div>"
-            f"  <div class='ois-side'>"
-            f"    <div class='ois-b'>{fmt(fb)}</div>"
-            f"    <div class='ois-a' style='color:{fc_clr}'>{fmt(fa)}</div>"
+            f"<div class='ois2-row'>"
+            f"  <div class='ois2-dim'>{dim}</div>"
+            f"  <div class='ois2-zone'>"
+            f"    <div class='ois2-b'>{fmt(fc_b)}</div>"
+            f"    <div class='ois2-a'>{fmt(fc_a)}</div>"
             f"  </div>"
-            f"  <div class='ois-mid'>"
-            f"    {_svg_arrow()}"
-            f"    <div class='ois-badge'>{fmt(xfer)}</div>"
+            f"  <div class='ois2-mid' style='width:260px;gap:8px'>"
+            f"    {_arr_r(fmt(out_v))}"
+            f"    {_arr_l(fmt(in_v))}"
             f"  </div>"
-            f"  <div class='ois-side'>"
-            f"    <div class='ois-b'>{fmt(sb)}</div>"
-            f"    <div class='ois-a' style='color:{sfc_clr}'>{fmt(sa)}</div>"
+            f"  <div class='ois2-zone'>"
+            f"    <div class='ois2-b'>{fmt(sfc_b)}</div>"
+            f"    <div class='ois2-a'>{fmt(sfc_a)}</div>"
             f"  </div>"
             f"</div>"
         )
 
-    st.markdown(f"<div class='ois'>{hdr}{body}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='ois2'>{hdr}{body}</div>", unsafe_allow_html=True)
 
     # ── FC 容量验证（点击展开才加载）────────────────────────
     with st.expander("🔍 FC Capacity Check (click to load)", expanded=False):
@@ -1771,7 +2225,7 @@ with page_capacity:
 
 # ── Planning Tab ──────────────────────────────────────────────
 with page_planning:
-    st.markdown("### 📋 30-Day Transfer Planning Simulator")
+    st.markdown("### 📋 Transfer Planning Simulator")
     st.caption("Simulate how many SKUs can be transferred within the plan window given daily capacity constraints.")
 
     page_size = 100  # rows per table
@@ -1861,8 +2315,8 @@ with page_planning:
         plan_params = dict(
             daily_cap_in       = daily_cap_in,
             daily_cap_out      = daily_cap_out,
-            daily_pallet_cap_out = pallet_cap_out,  # workers_out pallet cap
-            daily_pallet_cap_in  = pallet_cap_in,   # workers_in pallet cap
+            daily_pallet_cap_out = pallet_cap_out,
+            daily_pallet_cap_in  = pallet_cap_in,
             plan_days          = p_days,
             top_trigger_d2s    = p_top_trig,
             top_target_d2s     = p_top_target,
@@ -1873,10 +2327,77 @@ with page_planning:
             safety_d2s         = 7,
             min_loc_qty        = p_min_loc,
             pallet_vol_in3     = 106_000,
+            # FC capacity by location type for size-aware matching (smallest fitting slot first)
+            fc_cap_by_type     = (
+                df_cap[df_cap["zone"]=="FC"].assign(
+                    unit_cap=lambda d: (d["allowable_cap"] / d["total_locs"].replace(0, 1))
+                ).sort_values("unit_cap")[["storage_type","description","unit_cap","free_locs"]]
+                .to_dict("records")
+            ) if df_cap is not None else None,
         )
 
+    # Load FC→DC SKU stats (TAIL + MIDDLE evict) for real-time volume + location sort
+    _mid_evict_skus = df[
+        (df["seg"]=="MIDDLE") & (df["avg_daily_orders"]>0) &
+        ((df["fc_qty"] / df["avg_daily_orders"].replace(0, float("nan"))) > st.session_state.get("p_mid_evict", 30))
+    ]["item_number"].astype(str).tolist()
+    _tail_skus = df[(df["seg"]=="TAIL") & (df["fc_qty"]>0)]["item_number"].astype(str).tolist()
+    _fc_out_skus = list(set(_tail_skus + _mid_evict_skus))
+    with st.spinner("Loading FC location stats for sorting..."):
+        _sku_stats = load_sku_loc_stats(_fc_out_skus)
+
     with st.spinner("Running..."):
-        df_sched, daily, smry = run_planning(df, plan_params)
+        df_sched, daily, smry = run_planning(df, {**plan_params, "tail_stats": _sku_stats})
+
+    # ── MIDDLE DC→FC diagnosis ────────────────────────────────
+    with st.expander("🔍 Planning Debug", expanded=False):
+        import numpy as _np2
+        # TOP vol need check
+        _top = df[(df["seg"]=="TOP")&(df["avg_daily_orders"]>0)&(df["sfc_qty"]>0)].copy()
+        _top["fc_d2s"] = _top["fc_qty"]/_top["avg_daily_orders"]
+        _top = _top[_top["fc_d2s"]<plan_params["top_trigger_d2s"]]
+        _top_vol = (_top["transfer_vol"] if "transfer_vol" in _top.columns
+                    else _top["fc_qty"]*_top.get("unit_volume_cbm",0)).sum()
+        st.write(f"TOP pending SKUs: **{len(_top):,}**  |  TOP total vol: **{_top_vol/1e6:.2f}M in³**")
+
+        # TAIL vol check
+        _tail = df[(df["seg"]=="TAIL")&(df["fc_qty"]>0)].copy()
+        _tail_vol_zero = (_tail["unit_volume_cbm"]==0).sum()
+        _tail_vol_total = (_tail["fc_qty"]*_tail["unit_volume_cbm"]).sum()
+        st.write(f"TAIL SKUs: **{len(_tail):,}**  |  SKUs with vol=0: **{_tail_vol_zero:,}**  |  "
+                 f"Total vol: **{_tail_vol_total/1e6:.2f}M in³**")
+
+        # TAIL stats from MySQL
+        if _sku_stats is not None and not _sku_stats.empty:
+            _ts = _sku_stats[_sku_stats["item_number"].isin(_tail["item_number"].astype(str))]
+            st.write(f"TAIL stats loaded: **{len(_ts):,}** SKUs  |  "
+                     f"Total real vol: **{_ts['total_vol'].sum()/1e6:.2f}M in³**  |  "
+                     f"Total locs: **{_ts['loc_count'].sum():,}**")
+
+        # Swap log — shows daily TAIL/MIDDLE split
+        if smry and smry.get("swap_log"):
+            _sl = pd.DataFrame(smry["swap_log"])
+            st.write(f"Days run: **{len(_sl)}**")
+            st.dataframe(_sl[["day","top_n","tail_out","mid_out","top_in","mid_in","vol_out","vol_in","surplus_v","surplus_l"]].head(20), use_container_width=True, hide_index=True)
+
+        # MIDDLE DC→FC check
+        _mid = df[df["seg"]=="MIDDLE"].copy()
+        _mid = df[df["seg"]=="MIDDLE"].copy()
+        _mid["d2s_v"] = (_mid["fc_qty"] / _mid["avg_daily_orders"].replace(0, float("nan"))).fillna(0)
+        _mid["target"] = (_mid["avg_daily_orders"] * plan_params["mid_target_d2s"]).round(0)
+        _mid["needed"] = (_mid["target"] - _mid["fc_qty"]).clip(lower=0)
+        c1 = _mid["avg_daily_orders"] > 0
+        c2 = _mid["d2s_v"] <= plan_params["mid_routine_d2s"]
+        c3 = _mid["sfc_qty"] > 0
+        c4 = _mid["needed"] > 0
+        st.write(f"Total MIDDLE SKUs: **{len(_mid):,}**")
+        st.write(f"① adl > 0: {c1.sum():,}")
+        st.write(f"② d2s ≤ {plan_params['mid_routine_d2s']}D: {(c1 & c2).sum():,}")
+        st.write(f"③ sfc > 0: {(c1 & c2 & c3).sum():,}")
+        st.write(f"④ needed > 0: {(c1 & c2 & c3 & c4).sum():,}")
+        st.write(f"✅ All pass (eligible for DC→FC): **{(c1 & c2 & c3 & c4).sum():,}**")
+        # Show actual in_t2 size from run_planning
+        st.write(f"in_t2 (MIDDLE DC→FC in schedule): **{smry.get('n_in2', 'N/A')}** SKUs eligible")
 
     if not smry:
         st.warning("No transfers needed with current parameters.")
@@ -1921,6 +2442,62 @@ with page_planning:
              "#27ae60" if bal >= 0 else "#e74c3c")
 
         st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Remaining by tier breakdown ───────────────────────
+        if not df_sched.empty:
+            _done = df_sched.groupby(["action","seg"])["item_number"].count().reset_index(name="done")
+            _todo = {
+                ("FC_TO_DC","TAIL"):   int(((df["seg"]=="TAIL") & (df["fc_qty"]>0)).sum()),
+                ("FC_TO_DC","MIDDLE"): int(((df["seg"]=="MIDDLE") & (df["avg_daily_orders"]>0) &
+                                            ((df["fc_qty"]/df["avg_daily_orders"].replace(0,float("nan"))) >
+                                             plan_params.get("mid_evict_d2s",30))).sum()),
+                ("DC_TO_FC","TOP"):    int(((df["seg"]=="TOP") & (df["avg_daily_orders"]>0) & (df["sfc_qty"]>0) &
+                                           ((df["fc_qty"]/df["avg_daily_orders"].replace(0,float("nan"))) <
+                                            plan_params.get("top_trigger_d2s",28))).sum()),
+                ("DC_TO_FC","MIDDLE"): int(((df["seg"]=="MIDDLE") & (df["avg_daily_orders"]>0) & (df["sfc_qty"]>0) &
+                                           ((df["fc_qty"]/df["avg_daily_orders"].replace(0,float("nan"))) <=
+                                            plan_params.get("mid_routine_d2s",28))).sum()),
+            }
+            rem_rows = []
+            for (act, seg), total in _todo.items():
+                done = int(_done[(_done["action"]==act)&(_done["seg"]==seg)]["done"].sum()) if total > 0 else 0
+                rem  = max(0, total - done)
+                direction = "→ FC" if act=="DC_TO_FC" else "→ DC"
+                rem_rows.append({"Tier": seg, "Direction": direction,
+                                  "Total": total, "Done": done, "Remaining": rem,
+                                  "Complete %": f"{done/max(total,1)*100:.0f}%"})
+            _rem_df = pd.DataFrame(rem_rows)
+            st.markdown("##### Remaining by Tier")
+            st.dataframe(_rem_df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Total":     st.column_config.NumberColumn(format="%d"),
+                             "Done":      st.column_config.NumberColumn(format="%d"),
+                             "Remaining": st.column_config.NumberColumn(format="%d"),
+                         })
+        _fc_free_l = smry.get("fc_free_locs_initial", plan_params.get("fc_free_locs", 0))
+        _fc_out_l  = smry.get("locs_freed",    0)
+        _dc_in_l   = smry.get("locs_consumed", 0)
+        _net_locs  = smry.get("locs_net",      0)
+        _net_clr   = "#27ae60" if _net_locs >= 0 else "#e74c3c"
+        st.markdown(f"""
+        <div style="background:#f8f9ff;border-radius:10px;padding:14px 20px;
+             display:flex;gap:32px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <div style="font-size:.75rem;color:#888;font-weight:700;text-transform:uppercase;
+               letter-spacing:.05em">📍 FC Location Balance</div>
+          <div><div style="font-size:.7rem;color:#aaa">Initial Free Locs</div>
+               <div style="font-size:1.2rem;font-weight:700">{_fc_free_l:,}</div></div>
+          <div style="color:#ccc">＋</div>
+          <div><div style="font-size:.7rem;color:#e74c3c">Released (FC→DC)</div>
+               <div style="font-size:1.2rem;font-weight:700;color:#e74c3c">+{_fc_out_l:,}</div></div>
+          <div style="color:#ccc">－</div>
+          <div><div style="font-size:.7rem;color:#27ae60">Occupied (DC→FC)</div>
+               <div style="font-size:1.2rem;font-weight:700;color:#27ae60">-{_dc_in_l:,}</div></div>
+          <div style="color:#ccc">=</div>
+          <div><div style="font-size:.7rem;color:#888">Net Free After Plan</div>
+               <div style="font-size:1.3rem;font-weight:800;color:{_net_clr}">{_net_locs:,}
+                 {"✅" if _net_locs >= 0 else "⚠️"}</div></div>
+        </div>
+        """, unsafe_allow_html=True)
 
         # ── Daily charts ──────────────────────────────────────
         st.markdown("#### Daily Transfer")
@@ -2120,308 +2697,143 @@ with page_planning:
 
     st.divider()
 
-    # ── MIDDLE FC→DC Location Selection ──────────────────────
+    # ── Location-Level Plans — 2 buttons ─────────────────────
     import numpy as np
-    st.markdown("#### MIDDLE FC→DC — Location Selection Plan")
-    st.caption("Sheet rules: need_minimal_exp=1 → Rule 3/4 (exp-based), else Rule 1/2 (closest/excess)")
 
-    # Get MIDDLE FC→DC SKUs from df (current thresholds)
-    df_mid_plan = df.copy()
-    df_mid_plan["fc_d2s"] = np.where(
-        df_mid_plan["avg_daily_orders"]>0,
-        df_mid_plan["fc_qty"]/df_mid_plan["avg_daily_orders"], np.nan
-    )
-    df_mid_plan["keep_qty"]   = np.where(
-        df_mid_plan["avg_daily_orders"]>0,
-        np.round(df_mid_plan["avg_daily_orders"]*p_mid_evict), df_mid_plan["fc_qty"]
-    )
-    df_mid_plan["excess_qty"] = (df_mid_plan["fc_qty"] - df_mid_plan["keep_qty"]).clip(lower=0)
+    def _sort_by_area(df_locs, loc_col="location_no"):
+        """Sort by area density (most locs first), then location_no within area."""
+        if df_locs.empty: return df_locs
+        d = df_locs.copy()
+        d["_area"] = d[loc_col].astype(str).str[0]
+        cnt = d.groupby("_area")[loc_col].count().rename("_cnt")
+        d = d.join(cnt, on="_area")
+        d = d.sort_values(["_cnt","_area",loc_col], ascending=[False,True,True])\
+              .drop(columns=["_area","_cnt"]).reset_index(drop=True)
+        return d
 
-    mid_out_skus_df = df_mid_plan[
-        (df_mid_plan["seg"]=="MIDDLE") &
-        (df_mid_plan["avg_daily_orders"]>0) &
-        (~df_mid_plan["fc_d2s"].isna()) &
-        (df_mid_plan["fc_d2s"]>p_mid_evict) &
-        (df_mid_plan["excess_qty"]>p_min_loc)
-    ][["item_number","excess_qty","keep_qty","avg_daily_orders","unit_volume_cbm"]].copy()
-    mid_out_skus_df["item_number"] = mid_out_skus_df["item_number"].astype(str)
+    # ── Build SKU lists from current thresholds ───────────────
+    uv_map_plan = df.set_index("item_number")["unit_volume_cbm"].to_dict()
 
-    mid_out_skus_df["excess_qty"] = mid_out_skus_df["excess_qty"].round(0).astype(int)
-    mid_out_skus_df["keep_qty"]   = mid_out_skus_df["keep_qty"].round(0).astype(int)
+    _tail = df[(df["seg"]=="TAIL") & (df["fc_qty"]>0)][
+        ["item_number","fc_qty","avg_daily_orders","unit_volume_cbm"]].copy()
+    _tail["item_number"] = _tail["item_number"].astype(str)
 
-    st.caption(f"{len(mid_out_skus_df):,} MIDDLE SKUs need FC→DC  |  "
-               f"Total excess: {int(mid_out_skus_df['excess_qty'].sum()):,} units")
+    _dm = df.copy()
+    _dm["fc_d2s"]     = np.where(_dm["avg_daily_orders"]>0, _dm["fc_qty"]/_dm["avg_daily_orders"], np.nan)
+    _dm["keep_qty"]   = np.where(_dm["avg_daily_orders"]>0, np.round(_dm["avg_daily_orders"]*p_mid_evict), _dm["fc_qty"])
+    _dm["excess_qty"] = (_dm["fc_qty"]-_dm["keep_qty"]).clip(lower=0)
+    _mid_out = _dm[(_dm["seg"]=="MIDDLE")&(_dm["avg_daily_orders"]>0)&(~_dm["fc_d2s"].isna())
+                   &(_dm["fc_d2s"]>p_mid_evict)&(_dm["excess_qty"]>p_min_loc)][
+        ["item_number","excess_qty","keep_qty","avg_daily_orders","unit_volume_cbm"]].copy()
+    _mid_out["item_number"] = _mid_out["item_number"].astype(str)
+    _mid_out["excess_qty"]  = _mid_out["excess_qty"].round(0).astype(int)
+    _mid_out["keep_qty"]    = _mid_out["keep_qty"].round(0).astype(int)
 
-    if st.button("🔄 Load MIDDLE Location Plan (MySQL)", key="load_mid_locs"):
-        with st.spinner(f"Querying {len(mid_out_skus_df):,} SKU locations from MySQL..."):
-            df_lot_mid, lot_err = load_middle_locations(mid_out_skus_df["item_number"].tolist())
+    _top = df[(df["seg"]=="TOP")&(df["avg_daily_orders"]>0)&(df["sfc_qty"]>0)].copy()
+    _top["fc_d2s"]    = _top["fc_qty"]/_top["avg_daily_orders"]
+    _top = _top[_top["fc_d2s"]<p_top_trig].copy()
+    _top["item_number"] = _top["item_number"].astype(str)
+    _top["needed_qty"]  = (_top["avg_daily_orders"]*p_top_target - _top["fc_qty"]).clip(lower=0)
 
-        if lot_err:
-            st.error(f"MySQL error: {lot_err}")
-        elif df_lot_mid is not None:
-            with st.spinner("Applying location selection rules..."):
-                df_mid_locs = select_middle_locations(df_lot_mid, mid_out_skus_df)
-            st.session_state["mid_loc_plan"] = df_mid_locs
+    _di = df.copy()
+    _di["fc_d2s"] = np.where(_di["avg_daily_orders"]>0, _di["fc_qty"]/_di["avg_daily_orders"], np.nan)
+    _mid_in = _di[(_di["seg"]=="MIDDLE")&(_di["avg_daily_orders"]>0)&(~_di["fc_d2s"].isna())
+                  &(_di["fc_d2s"]<=p_mid_rout)&(_di["sfc_qty"]>0)].copy()
+    _mid_in["item_number"] = _mid_in["item_number"].astype(str)
+    _mid_in["needed_qty"]  = (_mid_in["avg_daily_orders"]*p_mid_target - _mid_in["fc_qty"]).clip(lower=0)
+    _mid_in = _mid_in[_mid_in["needed_qty"]>0]
 
-    if "mid_loc_plan" in st.session_state:
-        df_mid_locs = st.session_state["mid_loc_plan"]
-        if not df_mid_locs.empty:
-            # Rule summary
-            rule_sum = df_mid_locs.groupby("rule")[["item_number","qty_to_transfer"]].agg(
-                skus=("item_number","nunique"), qty=("qty_to_transfer","sum")).reset_index()
-            rule_sum["qty"] = rule_sum["qty"].round(0).astype(int)
-            r1, r2 = st.columns(2)
-            with r1:
-                st.markdown("**By Rule**")
-                st.dataframe(rule_sum, use_container_width=True, hide_index=True)
-            with r2:
-                st.markdown("**By Loc Type**")
-                loc_sum = df_mid_locs.groupby("loc_type")[["qty_to_transfer"]].agg(
-                    locs=("qty_to_transfer","count"), qty=("qty_to_transfer","sum")).reset_index()
-                loc_sum["qty"] = loc_sum["qty"].round(0).astype(int)
-                st.dataframe(loc_sum, use_container_width=True, hide_index=True)
+    st.markdown("#### 📍 Location-Level Plans")
+    st.caption(f"FC→DC: {len(_tail):,} TAIL + {len(_mid_out):,} MIDDLE evict  ·  "
+               f"DC→FC: {len(_top):,} TOP + {len(_mid_in):,} MIDDLE replenish")
 
-            # Detail table
-            mf1, mf2 = st.columns([1,1])
-            rule_f = mf1.selectbox("Rule", ["ALL"]+sorted(df_mid_locs["rule"].unique().tolist()),
-                                    key="mid_rule_f", label_visibility="collapsed")
-            type_f = mf2.selectbox("Loc Type", ["ALL","Bin","Stock"],
-                                    key="mid_type_f", label_visibility="collapsed")
-            show_mid = df_mid_locs.copy()
-            if rule_f != "ALL": show_mid = show_mid[show_mid["rule"]==rule_f]
-            if type_f != "ALL": show_mid = show_mid[show_mid["loc_type"]==type_f]
+    btn_l, btn_r = st.columns(2)
 
-            st.caption(f"{len(show_mid):,} location moves  (showing {min(page_size, len(show_mid)):,})")
-            st.dataframe(paginate(show_mid, "mid_out")[["item_number","location_no","loc_type","loc_qty",
-                                    "qty_to_transfer","exp_date","rule","excess_qty"]],
-                         use_container_width=True, hide_index=True, height=350)
-            st.download_button("⬇ Download Middle Plan",
-                               df_mid_locs.to_csv(index=False),
-                               "middle_fc_to_dc_plan.csv", "text/csv")
+    with btn_l:
+        if st.button("🔴 Load FC→DC Plan (MySQL)", key="load_fc_to_dc", use_container_width=True):
+            all_out = list(set(_tail["item_number"].tolist() + _mid_out["item_number"].tolist()))
+            with st.spinner(f"Querying {len(all_out):,} FC locations..."):
+                _fc_raw, _fc_err = _load_fc_locations(all_out)
+            if _fc_err:
+                st.error(f"MySQL error: {_fc_err}")
+            elif _fc_raw is not None:
+                tl = select_tail_locations(_fc_raw[_fc_raw["item_number"].isin(_tail["item_number"])])
+                tl["tier"] = "TAIL"
+                mo = select_middle_locations(_fc_raw[_fc_raw["item_number"].isin(_mid_out["item_number"])], _mid_out)
+                mo["tier"] = "MIDDLE"
+                _plan = pd.concat([_sort_by_area(tl) if not tl.empty else tl,
+                                   _sort_by_area(mo) if not mo.empty else mo], ignore_index=True)
+                _plan["transfer_vol"] = (_plan["qty_to_transfer"] * _plan["item_number"].map(uv_map_plan).fillna(0)).round(0).astype(int)
+                st.session_state["plan2_fc_to_dc"] = _plan
 
-    st.divider()
+    with btn_r:
+        if st.button("🟢 Load DC→FC Plan (MySQL)", key="load_dc_to_fc", use_container_width=True):
+            all_in = list(set(_top["item_number"].tolist() + _mid_in["item_number"].tolist()))
+            with st.spinner(f"Querying {len(all_in):,} SFC locations..."):
+                _sfc_raw, _sfc_err = load_top_sfc_locations(all_in)
+            if _sfc_err:
+                st.error(f"MySQL error: {_sfc_err}")
+            elif _sfc_raw is not None:
+                tl2 = select_top_locations(_sfc_raw[_sfc_raw["item_number"].isin(_top["item_number"])], _top)
+                tl2["tier"] = "TOP"
+                mi2 = select_top_locations(_sfc_raw[_sfc_raw["item_number"].isin(_mid_in["item_number"])], _mid_in)
+                mi2["tier"] = "MIDDLE"
+                _plan2 = pd.concat([_sort_by_area(tl2) if not tl2.empty else tl2,
+                                    _sort_by_area(mi2) if not mi2.empty else mi2], ignore_index=True)
+                _plan2["transfer_vol"] = (_plan2["qty_to_transfer"] * _plan2["item_number"].map(uv_map_plan).fillna(0)).round(0).astype(int)
+                st.session_state["plan2_dc_to_fc"] = _plan2
 
-    # ── TAIL FC→DC Location Plan ──────────────────────────────
-    st.markdown("#### TAIL FC→DC — Location-level Plan")
-    st.caption("Full clear: all FC locations per SKU. Sorted by location_no for sequential ops.")
+    # ── FC→DC result ──────────────────────────────────────────
+    if "plan2_fc_to_dc" in st.session_state:
+        fc2 = st.session_state["plan2_fc_to_dc"]
+        st.markdown(f"##### 🔴 FC→DC — {len(fc2):,} locations  (TAIL → MIDDLE, sorted by area density)")
+        ka, kb, kc = st.columns(3)
+        ka.metric("Locations", f"{len(fc2):,}")
+        kb.metric("SKUs",      f"{fc2['item_number'].nunique():,}")
+        kc.metric("Volume",    f"{fc2['transfer_vol'].sum()/1e6:.1f}M in³")
+        fc_f1, fc_f2 = st.columns([1,1])
+        fc_tf = fc_f1.selectbox("Tier", ["ALL","TAIL","MIDDLE"], key="fc2_tier", label_visibility="collapsed")
+        fc_sf = fc_f2.text_input("Filter SKU", "", key="fc2_sku", placeholder="item_number...")
+        show2 = fc2.copy()
+        if fc_tf != "ALL": show2 = show2[show2["tier"]==fc_tf]
+        if fc_sf:           show2 = show2[show2["item_number"].str.contains(fc_sf)]
+        cols2 = ["tier","item_number","location_no","loc_type","qty_to_transfer","transfer_vol"]
+        if "exp_date" in show2.columns: cols2.append("exp_date")
+        st.dataframe(show2[cols2], use_container_width=True, hide_index=True, height=500,
+            column_config={
+                "tier":           st.column_config.TextColumn("Tier",     width="small"),
+                "item_number":    st.column_config.TextColumn("SKU",      width="medium"),
+                "location_no":    st.column_config.TextColumn("Location", width="medium"),
+                "loc_type":       st.column_config.TextColumn("Type",     width="small"),
+                "qty_to_transfer":st.column_config.NumberColumn("Qty",    format="%d"),
+                "transfer_vol":   st.column_config.NumberColumn("Vol(in³)",format="%d"),
+            })
+        st.download_button("⬇ Download FC→DC", fc2.to_csv(index=False), "fc_to_dc_plan.csv", "text/csv")
 
-    tail_skus_df = df[
-        (df["seg"]=="TAIL") & (df["fc_qty"]>0)
-    ][["item_number","fc_qty","avg_daily_orders","unit_volume_cbm"]].copy()
-    tail_skus_df["item_number"] = tail_skus_df["item_number"].astype(str)
-
-    st.caption(f"{len(tail_skus_df):,} TAIL SKUs to clear from FC  |  "
-               f"Total FC qty: {int(tail_skus_df['fc_qty'].sum()):,} units")
-
-    if st.button("🔄 Load TAIL Location Plan (MySQL)", key="load_tail_locs"):
-        with st.spinner(f"Querying {len(tail_skus_df):,} TAIL SKU locations..."):
-            df_lot_tail, tail_err = load_tail_locations(tail_skus_df["item_number"].tolist())
-        if tail_err:
-            st.error(f"MySQL error: {tail_err}")
-        elif df_lot_tail is not None:
-            df_tail_locs = select_tail_locations(df_lot_tail)
-            # add unit_vol for volume calc
-            uv_map = tail_skus_df.set_index("item_number")["unit_volume_cbm"].to_dict()
-            df_tail_locs["unit_vol"] = df_tail_locs["item_number"].map(uv_map).fillna(0)
-            df_tail_locs["transfer_vol"] = (df_tail_locs["qty_to_transfer"] * df_tail_locs["unit_vol"]).round(0).astype(int)
-            st.session_state["tail_loc_plan"] = df_tail_locs
-
-    if "tail_loc_plan" in st.session_state:
-        df_tail_locs = st.session_state["tail_loc_plan"]
-        if not df_tail_locs.empty:
-            t1, t2, t3 = st.columns(3)
-            t1.metric("Total Locations", f"{df_tail_locs['location_no'].nunique():,}")
-            t2.metric("Total Qty", f"{int(df_tail_locs['qty_to_transfer'].sum()):,}")
-            t3.metric("Total Volume", f"{df_tail_locs['transfer_vol'].sum()/1e6:.1f}M in³")
-
-            # Loc type breakdown
-            lt_sum = df_tail_locs.groupby("loc_type").agg(
-                locs=("location_no","nunique"),
-                qty =("qty_to_transfer","sum"),
-            ).reset_index()
-            lt_sum["qty"] = lt_sum["qty"].round(0).astype(int)
-            st.dataframe(lt_sum, use_container_width=True, hide_index=True)
-
-            # Filter + detail
-            tf1, tf2 = st.columns([1,1])
-            t_type_f  = tf1.selectbox("Loc Type", ["ALL","Bin","Stock"], key="t_type_f",
-                                       label_visibility="collapsed")
-            t_sku_f   = tf2.text_input("Filter SKU", "", key="t_sku_f",
-                                        placeholder="item_number...")
-            show_tail = df_tail_locs.copy()
-            if t_type_f != "ALL": show_tail = show_tail[show_tail["loc_type"]==t_type_f]
-            if t_sku_f:           show_tail = show_tail[show_tail["item_number"].str.contains(t_sku_f)]
-
-            st.caption(f"{len(show_tail):,} location moves  (showing {min(page_size, len(show_tail)):,})")
-            st.dataframe(
-                paginate(show_tail, "tail")[["item_number","location_no","loc_type","qty_to_transfer",
-                            "transfer_vol","exp_date","rule"]],
-                use_container_width=True, hide_index=True, height=400,
-                column_config={
-                    "item_number":    st.column_config.TextColumn("SKU", width="medium"),
-                    "location_no":    st.column_config.TextColumn("Location", width="medium"),
-                    "loc_type":       st.column_config.TextColumn("Type", width="small"),
-                    "qty_to_transfer":st.column_config.NumberColumn("Qty", format="%d"),
-                    "transfer_vol":   st.column_config.NumberColumn("Vol (in³)", format="%d"),
-                    "exp_date":       st.column_config.TextColumn("Exp Date"),
-                    "rule":           st.column_config.TextColumn("Rule"),
-                }
-            )
-            st.download_button("⬇ Download TAIL Plan",
-                               df_tail_locs.to_csv(index=False),
-                               "tail_fc_to_dc_plan.csv", "text/csv")
-
-    st.divider()
-
-    # ── MIDDLE DC→FC Location Plan ────────────────────────────
-    st.markdown("#### MIDDLE DC→FC — Location-level Plan (SFC → FC)")
-    st.caption("Routine replenish: whole-location transfer from SFC until 28D2S reached.")
-
-    mid_in_skus_df = df.copy()
-    mid_in_skus_df["fc_d2s"] = np.where(
-        mid_in_skus_df["avg_daily_orders"]>0,
-        mid_in_skus_df["fc_qty"]/mid_in_skus_df["avg_daily_orders"], np.nan
-    )
-    mid_in_skus_df = mid_in_skus_df[
-        (mid_in_skus_df["seg"]=="MIDDLE") &
-        (mid_in_skus_df["avg_daily_orders"]>0) &
-        (~mid_in_skus_df["fc_d2s"].isna()) &
-        (mid_in_skus_df["fc_d2s"] <= p_mid_rout) &
-        (mid_in_skus_df["sfc_qty"] > 0)
-    ].copy()
-    mid_in_skus_df["item_number"] = mid_in_skus_df["item_number"].astype(str)
-    mid_in_skus_df["needed_qty"]  = (mid_in_skus_df["avg_daily_orders"] * p_mid_target - mid_in_skus_df["fc_qty"]).clip(lower=0)
-    mid_in_skus_df = mid_in_skus_df[mid_in_skus_df["needed_qty"] > 0]
-
-    st.caption(f"{len(mid_in_skus_df):,} MIDDLE SKUs need DC→FC  |  "
-               f"Total needed qty: {int(mid_in_skus_df['needed_qty'].sum()):,} units")
-
-    if st.button("🔄 Load MIDDLE DC→FC Location Plan (MySQL)", key="load_mid_in_locs"):
-        with st.spinner(f"Querying {len(mid_in_skus_df):,} MIDDLE SKU SFC locations..."):
-            df_sfc_mid, mid_in_err = load_top_sfc_locations(mid_in_skus_df["item_number"].tolist())
-        if mid_in_err:
-            st.error(f"MySQL error: {mid_in_err}")
-        elif df_sfc_mid is not None:
-            # reuse select_top_locations logic (same: pick min SFC locs to reach target)
-            df_mid_in_locs = select_top_locations(df_sfc_mid, mid_in_skus_df)
-            uv_map = mid_in_skus_df.set_index("item_number")["unit_volume_cbm"].to_dict()
-            df_mid_in_locs["unit_vol"]     = df_mid_in_locs["item_number"].map(uv_map).fillna(0)
-            df_mid_in_locs["transfer_vol"] = (df_mid_in_locs["qty_to_transfer"] * df_mid_in_locs["unit_vol"]).round(0).astype(int)
-            df_mid_in_locs["rule"] = "MID_DC_TO_FC"
-            st.session_state["mid_in_loc_plan"] = df_mid_in_locs
-
-    if "mid_in_loc_plan" in st.session_state:
-        df_mid_in_locs = st.session_state["mid_in_loc_plan"]
-        if not df_mid_in_locs.empty:
-            mi1, mi2, mi3 = st.columns(3)
-            mi1.metric("Total Locations", f"{df_mid_in_locs['location_no'].nunique():,}")
-            mi2.metric("Total Qty", f"{int(df_mid_in_locs['qty_to_transfer'].sum()):,}")
-            mi3.metric("SKUs covered", f"{df_mid_in_locs['item_number'].nunique():,}")
-
-            lt_mid_in = df_mid_in_locs.groupby("loc_type").agg(
-                locs=("location_no","nunique"), qty=("qty_to_transfer","sum")).reset_index()
-            lt_mid_in["qty"] = lt_mid_in["qty"].round(0).astype(int)
-            st.dataframe(lt_mid_in, use_container_width=True, hide_index=True)
-
-            mif1, mif2 = st.columns([1,1])
-            mi_type_f = mif1.selectbox("Loc Type", ["ALL","Bin","Stock"], key="mi_type_f",
-                                        label_visibility="collapsed")
-            mi_sku_f  = mif2.text_input("Filter SKU", "", key="mi_sku_f",
-                                         placeholder="item_number...")
-            show_mid_in = df_mid_in_locs.copy()
-            if mi_type_f != "ALL": show_mid_in = show_mid_in[show_mid_in["loc_type"]==mi_type_f]
-            if mi_sku_f:           show_mid_in = show_mid_in[show_mid_in["item_number"].str.contains(mi_sku_f)]
-
-            st.caption(f"{len(show_mid_in):,} location moves  (showing {min(page_size, len(show_mid_in)):,})")
-            st.dataframe(
-                paginate(show_mid_in, "mid_in")[["item_number","location_no","loc_type","storage_type",
-                              "loc_qty","qty_to_transfer","transfer_vol",
-                              "fc_qty_before","target_qty","rule"]],
-                use_container_width=True, hide_index=True, height=400,
-                column_config={
-                    "item_number":    st.column_config.TextColumn("SKU", width="medium"),
-                    "location_no":    st.column_config.TextColumn("Location", width="medium"),
-                    "loc_type":       st.column_config.TextColumn("Type", width="small"),
-                    "storage_type":   st.column_config.TextColumn("Storage", width="medium"),
-                    "loc_qty":        st.column_config.NumberColumn("Loc Qty", format="%d"),
-                    "qty_to_transfer":st.column_config.NumberColumn("Transfer Qty", format="%d"),
-                    "transfer_vol":   st.column_config.NumberColumn("Vol (in³)", format="%d"),
-                    "fc_qty_before":  st.column_config.NumberColumn("FC Before", format="%d"),
-                    "target_qty":     st.column_config.NumberColumn("28D Target", format="%d"),
-                }
-            )
-            st.download_button("⬇ Download MIDDLE DC→FC Plan",
-                               df_mid_in_locs.to_csv(index=False),
-                               "middle_dc_to_fc_plan.csv", "text/csv")
-    st.markdown("#### TOP DC→FC — Location-level Plan (SFC → FC)")
-    st.caption("Whole-location transfer from SFC. Min locations to reach 28D2S. Sorted by location_no.")
-
-    top_skus_df = df[
-        (df["seg"]=="TOP") &
-        (df["avg_daily_orders"]>0) &
-        (df["sfc_qty"]>0)
-    ].copy()
-    top_skus_df["fc_d2s"] = top_skus_df["fc_qty"] / top_skus_df["avg_daily_orders"]
-    top_skus_df = top_skus_df[top_skus_df["fc_d2s"] < p_top_trig].copy()
-    top_skus_df["item_number"] = top_skus_df["item_number"].astype(str)
-    top_skus_df["needed_qty"]  = (top_skus_df["avg_daily_orders"] * p_top_target - top_skus_df["fc_qty"]).clip(lower=0)
-
-    st.caption(f"{len(top_skus_df):,} TOP SKUs need DC→FC  |  "
-               f"Total needed qty: {int(top_skus_df['needed_qty'].sum()):,} units")
-
-    if st.button("🔄 Load TOP Location Plan (MySQL)", key="load_top_locs"):
-        with st.spinner(f"Querying {len(top_skus_df):,} TOP SKU SFC locations..."):
-            df_sfc_top, top_err = load_top_sfc_locations(top_skus_df["item_number"].tolist())
-        if top_err:
-            st.error(f"MySQL error: {top_err}")
-        elif df_sfc_top is not None:
-            df_top_locs = select_top_locations(df_sfc_top, top_skus_df)
-            uv_map = top_skus_df.set_index("item_number")["unit_volume_cbm"].to_dict()
-            df_top_locs["unit_vol"]     = df_top_locs["item_number"].map(uv_map).fillna(0)
-            df_top_locs["transfer_vol"] = (df_top_locs["qty_to_transfer"] * df_top_locs["unit_vol"]).round(0).astype(int)
-            st.session_state["top_loc_plan"] = df_top_locs
-
-    if "top_loc_plan" in st.session_state:
-        df_top_locs = st.session_state["top_loc_plan"]
-        if not df_top_locs.empty:
-            tp1, tp2, tp3 = st.columns(3)
-            tp1.metric("Total Locations", f"{df_top_locs['location_no'].nunique():,}")
-            tp2.metric("Total Qty", f"{int(df_top_locs['qty_to_transfer'].sum()):,}")
-            tp3.metric("SKUs covered", f"{df_top_locs['item_number'].nunique():,}")
-
-            lt_top = df_top_locs.groupby("loc_type").agg(
-                locs=("location_no","nunique"), qty=("qty_to_transfer","sum")).reset_index()
-            lt_top["qty"] = lt_top["qty"].round(0).astype(int)
-            st.dataframe(lt_top, use_container_width=True, hide_index=True)
-
-            tpf1, tpf2 = st.columns([1,1])
-            tp_type_f = tpf1.selectbox("Loc Type", ["ALL","Bin","Stock"], key="tp_type_f",
-                                        label_visibility="collapsed")
-            tp_sku_f  = tpf2.text_input("Filter SKU", "", key="tp_sku_f",
-                                         placeholder="item_number...")
-            show_top = df_top_locs.copy()
-            if tp_type_f != "ALL": show_top = show_top[show_top["loc_type"]==tp_type_f]
-            if tp_sku_f:           show_top = show_top[show_top["item_number"].str.contains(tp_sku_f)]
-
-            st.caption(f"{len(show_top):,} location moves  (showing {min(page_size, len(show_top)):,})")
-            st.dataframe(
-                paginate(show_top, "top")[["item_number","location_no","loc_type","storage_type",
-                           "loc_qty","qty_to_transfer","transfer_vol",
-                           "fc_qty_before","target_qty","rule"]],
-                use_container_width=True, hide_index=True, height=400,
-                column_config={
-                    "item_number":    st.column_config.TextColumn("SKU", width="medium"),
-                    "location_no":    st.column_config.TextColumn("Location", width="medium"),
-                    "loc_type":       st.column_config.TextColumn("Type", width="small"),
-                    "storage_type":   st.column_config.TextColumn("Storage", width="medium"),
-                    "loc_qty":        st.column_config.NumberColumn("Loc Qty", format="%d"),
-                    "qty_to_transfer":st.column_config.NumberColumn("Transfer Qty", format="%d"),
-                    "transfer_vol":   st.column_config.NumberColumn("Vol (in³)", format="%d"),
-                    "fc_qty_before":  st.column_config.NumberColumn("FC Before", format="%d"),
-                    "target_qty":     st.column_config.NumberColumn("28D Target", format="%d"),
-                    "rule":           st.column_config.TextColumn("Rule"),
-                }
-            )
-            st.download_button("⬇ Download TOP Plan",
-                               df_top_locs.to_csv(index=False),
-                               "top_dc_to_fc_plan.csv", "text/csv")
+    # ── DC→FC result ──────────────────────────────────────────
+    if "plan2_dc_to_fc" in st.session_state:
+        dc2 = st.session_state["plan2_dc_to_fc"]
+        st.markdown(f"##### 🟢 DC→FC — {len(dc2):,} locations  (TOP → MIDDLE, sorted by area density)")
+        na, nb, nc = st.columns(3)
+        na.metric("Locations", f"{len(dc2):,}")
+        nb.metric("SKUs",      f"{dc2['item_number'].nunique():,}")
+        nc.metric("Volume",    f"{dc2['transfer_vol'].sum()/1e6:.1f}M in³")
+        dc_f1, dc_f2 = st.columns([1,1])
+        dc_tf = dc_f1.selectbox("Tier", ["ALL","TOP","MIDDLE"], key="dc2_tier", label_visibility="collapsed")
+        dc_sf = dc_f2.text_input("Filter SKU", "", key="dc2_sku", placeholder="item_number...")
+        show3 = dc2.copy()
+        if dc_tf != "ALL": show3 = show3[show3["tier"]==dc_tf]
+        if dc_sf:           show3 = show3[show3["item_number"].str.contains(dc_sf)]
+        cols3 = ["tier","item_number","location_no","loc_type","qty_to_transfer","transfer_vol"]
+        if "storage_type" in show3.columns: cols3.insert(3,"storage_type")
+        st.dataframe(show3[cols3], use_container_width=True, hide_index=True, height=500,
+            column_config={
+                "tier":           st.column_config.TextColumn("Tier",     width="small"),
+                "item_number":    st.column_config.TextColumn("SKU",      width="medium"),
+                "location_no":    st.column_config.TextColumn("Location", width="medium"),
+                "loc_type":       st.column_config.TextColumn("Type",     width="small"),
+                "storage_type":   st.column_config.TextColumn("Storage",  width="medium"),
+                "qty_to_transfer":st.column_config.NumberColumn("Qty",    format="%d"),
+                "transfer_vol":   st.column_config.NumberColumn("Vol(in³)",format="%d"),
+            })
+        st.download_button("⬇ Download DC→FC", dc2.to_csv(index=False), "dc_to_fc_plan.csv", "text/csv")
