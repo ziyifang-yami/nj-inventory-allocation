@@ -96,13 +96,11 @@ def load_inventory():
                     SUM(CASE
                         WHEN wsli.location_no NOT LIKE 'S%%'
                          AND wsli.location_no NOT LIKE 'DC%%'
-                         AND wsli.location_no NOT LIKE 'K%%'
-                        THEN wit.quantity ELSE 0 END) AS fc_qty,
+                                                 THEN wit.quantity ELSE 0 END) AS fc_qty,
                     SUM(CASE
                         WHEN wsli.location_no     LIKE 'S%%'
                           OR wsli.location_no     LIKE 'DC%%'
-                          OR wsli.location_no     LIKE 'K%%'
-                        THEN wit.quantity ELSE 0 END) AS sfc_qty
+                                                THEN wit.quantity ELSE 0 END) AS sfc_qty
                 FROM yamibuy_wh.wh_storage_location_item wsli
                 JOIN yamibuy_wh.wh_inventory_transaction wit
                     ON wit.item_number      = wsli.item_number
@@ -154,8 +152,7 @@ def load_capacity():
                     CASE
                         WHEN wsl.location_no NOT LIKE 'S%'
                          AND wsl.location_no NOT LIKE 'DC%'
-                         AND wsl.location_no NOT LIKE 'K%'
-                        THEN 'FC'
+                                               THEN 'FC'
                         ELSE 'SFC'
                     END AS zone,
                     CASE WHEN wsl.location_type = 4 THEN 'Bin'
@@ -163,8 +160,7 @@ def load_capacity():
                     CONCAT(
                         CASE WHEN wsl.location_no NOT LIKE 'S%'
                               AND wsl.location_no NOT LIKE 'DC%'
-                              AND wsl.location_no NOT LIKE 'K%'
-                             THEN 'FC' ELSE 'SFC' END,
+                                                         THEN 'FC' ELSE 'SFC' END,
                         '_',
                         CASE WHEN wsl.location_type = 4 THEN 'Bin'
                              WHEN wsl.location_type = 3 THEN 'Stock' END
@@ -377,8 +373,7 @@ def load_sku_loc_stats(skus_tuple):
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
               AND (li.location_no NOT LIKE 'S%%'
-               AND li.location_no NOT LIKE 'DC%%'
-               AND li.location_no NOT LIKE 'K%%')
+               AND li.location_no NOT LIKE 'DC%%')
               AND li.item_number IN ({ph})
             GROUP BY li.item_number
         """
@@ -432,8 +427,7 @@ def _load_fc_locations(skus):
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
               AND (li.location_no NOT LIKE 'S%%'
-               AND li.location_no NOT LIKE 'DC%%'
-               AND li.location_no NOT LIKE 'K%%')
+               AND li.location_no NOT LIKE 'DC%%')
               AND li.item_number IN ({ph})
             GROUP BY li.item_number, li.location_no, wsl.location_type
             HAVING SUM(li.quantity) > 0
@@ -562,8 +556,7 @@ def load_top_sfc_locations(skus):
               AND wit.quantity > 0
               AND wsl.location_type IN (3, 4)
               AND (wit.location_no LIKE 'S%%'
-                OR wit.location_no LIKE 'DC%%'
-                OR wit.location_no LIKE 'K%%')
+                OR wit.location_no LIKE 'DC%%')
               AND wit.item_number IN ({ph})
             GROUP BY wit.item_number, wit.location_no, wsl.location_type,
                      wls.storage_type, wls.volume, wls.fill_rate
