@@ -582,9 +582,8 @@ def load_top_sfc_locations(skus):
 
 def select_top_locations(df_sfc_locs, df_top_skus):
     """
-    TOP DC→FC: pick minimum SFC locations (ascending qty) until
-    fc_qty + cum_qty >= 28 × avg_daily_orders.
-    Whole-location transfer. Sorted by location_no for sequential ops.
+    TOP DC→FC: transfer ALL SFC locations back to FC (full quantity).
+    Sorted by location_no for sequential ops.
     """
     results = []
     for _, sku_row in df_top_skus.iterrows():
@@ -592,14 +591,13 @@ def select_top_locations(df_sfc_locs, df_top_skus):
         fc_now = sku_row["fc_qty"]
         adl    = sku_row["avg_daily_orders"]
         target = adl * 28
-        needed = max(0, target - fc_now)
 
         locs = df_sfc_locs[df_sfc_locs["item_number"]==sku]\
-                 .sort_values("qty", ascending=True).reset_index(drop=True)
+                 .sort_values("location_no", ascending=True).reset_index(drop=True)
         if locs.empty:
             continue
 
-        cum = 0
+        # TOP: transfer all SFC locations, no cap
         for _, loc in locs.iterrows():
             results.append({
                 "item_number":     sku,
@@ -608,14 +606,11 @@ def select_top_locations(df_sfc_locs, df_top_skus):
                 "storage_type":    loc.get("storage_type",""),
                 "loc_qty":         loc["qty"],
                 "qty_to_transfer": round(loc["qty"]),
-                "rule":            "TOP_DC_TO_FC",
+                "rule":            "TOP_DC_TO_FC_FULL",
                 "fc_qty_before":   fc_now,
                 "target_qty":      round(target),
-                "needed_qty":      round(needed),
+                "needed_qty":      round(locs["qty"].sum()),  # full SFC qty
             })
-            cum += loc["qty"]
-            if fc_now + cum >= target and needed > 0:
-                break  # reached 28D2S target
 
     return pd.DataFrame(results).sort_values(["item_number","location_no"]).reset_index(drop=True)
 
@@ -648,10 +643,9 @@ def run_planning(df_in, p):
     # DC→FC: TOP  (1xxx) > MIDDLE (2xxx)
 
     # ── TOP DC→FC (priority 1000-1999) ───────────────────────
-    m_top = (seg == "TOP") & (adl > 0) & (np.isnan(fc_d2s) | (fc_d2s < p["top_trigger_d2s"]))
-    needed_top = np.maximum(0, top_target - fc)
-    xfer_top   = np.minimum(needed_top, sfc)
-    active_top = m_top & (needed_top > 0) & (sfc > 0)
+    m_top = (seg == "TOP") & (adl > 0) & (sfc > 0)
+    xfer_top   = sfc  # TOP: full transfer, no cap
+    active_top = m_top
     action[active_top]       = "DC_TO_FC"
     transfer_qty[active_top] = np.round(xfer_top[active_top])
     d2s_top = np.where(np.isnan(fc_d2s), 0, fc_d2s)
@@ -1012,16 +1006,14 @@ def calc_ideal(df_in, aod_top, ol_top, ol_tail,
         reason        = ""
 
         if seg == "TOP":
-            if adl > 0 and (pd.isna(fc_d2s) or fc_d2s < top_trigger):
-                needed = max(0.0, round(adl * top_target, 0) - fc)
-                if needed > 0 and sfc > 0:
-                    xfer          = min(needed, sfc)
-                    action        = "DC_TO_FC"
-                    transfer_qty  = round(xfer, 0)
-                    fc_ideal      = fc + xfer
-                    sfc_ideal     = sfc - xfer
-                    d2s_val       = fc_d2s if not pd.isna(fc_d2s) else 0.0
-                    reason        = f"FC D2S={d2s_val:.1f} < {top_trigger}"
+            if sfc > 0:
+                xfer          = sfc  # TOP: full transfer back, no cap
+                action        = "DC_TO_FC"
+                transfer_qty  = round(xfer, 0)
+                fc_ideal      = fc + xfer
+                sfc_ideal     = 0.0
+                d2s_val       = fc_d2s if not pd.isna(fc_d2s) else 0.0
+                reason        = f"TOP full SFC→FC transfer (FC D2S={d2s_val:.1f})"
 
         elif seg == "MIDDLE":
             if adl > 0:
@@ -1140,8 +1132,8 @@ with st.sidebar:
 
     # ── Session state init ──────────────────────────────────
     if "aod_top_val" not in st.session_state: st.session_state.aod_top_val = 21
-    if "ol_top_val"  not in st.session_state: st.session_state.ol_top_val  = 30
-    if "ol_tail_val" not in st.session_state: st.session_state.ol_tail_val = 8
+    if "ol_top_val"  not in st.session_state: st.session_state.ol_top_val  = 100
+    if "ol_tail_val" not in st.session_state: st.session_state.ol_tail_val = 4
 
     def sync_from_slider(val_key, sld_key):
         st.session_state[val_key] = st.session_state[sld_key]
@@ -1608,12 +1600,20 @@ with page_compare:
     _mid_rout   = st.session_state.get("p_mid_rout",   28)
     _mid_evict  = st.session_state.get("p_mid_evict",  30)
     _mid_target = st.session_state.get("p_mid_target", 28)
-    df_ideal = calc_ideal(
-        df, aod_top, ol_top, ol_tail,
-        top_trigger=_top_trig,   top_target=_top_target,
-        mid_routine=_mid_rout,   mid_emergency=14,
-        mid_evict=_mid_evict,    mid_target=_mid_target,
-    )
+
+    # Cache key — only recompute when any param changes
+    _ideal_key = (aod_top, ol_top, ol_tail,
+                  _top_trig, _top_target, _mid_rout, _mid_evict, _mid_target)
+    if (st.session_state.get("_ideal_cache_key") != _ideal_key
+            or "df_ideal" not in st.session_state):
+        st.session_state["df_ideal"] = calc_ideal(
+            df, aod_top, ol_top, ol_tail,
+            top_trigger=_top_trig,   top_target=_top_target,
+            mid_routine=_mid_rout,   mid_emergency=14,
+            mid_evict=_mid_evict,    mid_target=_mid_target,
+        )
+        st.session_state["_ideal_cache_key"] = _ideal_key
+    df_ideal = st.session_state["df_ideal"]
     # df 已经是有库存全量，calc_ideal 输出行数与 Overview 完全一致
 
     # ── CSS helpers ───────────────────────────────────────
@@ -1621,10 +1621,15 @@ with page_compare:
     def arrow(val): return "▲" if val>0 else "▼" if val<0 else "─"
 
     # ── Page header ───────────────────────────────────────
-    st.markdown("### ⚖️ Before vs After")
-    st.caption(f"TOP: AOD≥{aod_top} & OL≥{ol_top}  ·  TAIL: OL<{ol_tail}  ·  "
-               f"{len(df_ideal):,} in-stock SKUs  ·  Dynamic ideal state (no daily cap)")
-    st.divider()
+    st.markdown(
+        f"<div style='padding:8px 0 12px 0;border-bottom:1px solid #eee;margin-bottom:16px'>"
+        f"<span style='font-size:1.3rem;font-weight:700'>⚖️ Before vs After</span>"
+        f"<span style='font-size:.82rem;color:#999;margin-left:12px'>"
+        f"TOP: AOD≥{aod_top} & OL≥{ol_top} · TAIL: OL&lt;{ol_tail} · "
+        f"{len(df_ideal):,} in-stock SKUs · Dynamic ideal state (no daily cap)"
+        f"</span></div>",
+        unsafe_allow_html=True
+    )
 
     # ── Section 1: Overall Inventory Shift ────────────────
     st.markdown("#### Overall Inventory Shift")
@@ -1719,7 +1724,7 @@ with page_compare:
     .ois2-dim { width:80px; font-size:.82rem; font-weight:700; color:#bbb;
                 text-transform:uppercase; letter-spacing:.07em; }
     .ois2-zone { flex:1; text-align:center; }
-    .ois2-b { font-size:.9rem; font-weight:400; color:#ccc; }
+    .ois2-b { font-size:.9rem; font-weight:400; color:#888; }
     .ois2-a { font-size:1.8rem; font-weight:800; color:#222; line-height:1.1; margin-top:2px; }
     .ois2-mid { width:260px; display:flex; flex-direction:column;
                 align-items:center; gap:6px; }
@@ -1865,13 +1870,13 @@ with page_compare:
         arr  = "▲" if delta>0 else "▼" if delta<0 else "─"
         icon = _LOC_ICONS.get(loc, "")
         return (
-            f"<div style='display:flex;justify-content:space-between;"
-            f"align-items:center;padding:7px 0;border-bottom:1px solid #f0f0f0'>"
-            f"<span style='font-size:.88rem;color:#444;min-width:90px'>{icon} {loc}</span>"
-            f"<span style='font-size:.88rem;color:#888;min-width:60px;text-align:right'>{b:,}</span>"
-            f"<span style='color:#ccc;font-size:.82rem;padding:0 6px'>→</span>"
-            f"<span style='font-size:.88rem;color:#222;font-weight:700;min-width:60px'>{a:,}</span>"
-            f"<span style='font-size:.85rem;font-weight:700;color:{dclr};min-width:52px;text-align:right'>"
+            f"<div style='display:grid;grid-template-columns:2fr 1.5fr 20px 1.5fr 1.5fr;"
+            f"align-items:center;padding:7px 0;border-bottom:1px solid #f0f0f0;column-gap:4px'>"
+            f"<span style='font-size:.95rem;color:#444'>{icon} {loc}</span>"
+            f"<span style='font-size:.95rem;color:#888'>{b:,}</span>"
+            f"<span style='color:#ccc;font-size:.9rem'>→</span>"
+            f"<span style='font-size:.95rem;color:#222;font-weight:700'>{a:,}</span>"
+            f"<span style='font-size:.95rem;font-weight:700;color:{dclr}'>"
             f"{arr} {abs(delta):,}</span>"
             f"</div>"
         )
@@ -1898,6 +1903,26 @@ with page_compare:
         fvd    = fc_va  - fc_vb
         svd    = sfc_va - sfc_vb
 
+        # dual-warehouse (overlap): SKUs present in BOTH FC and SFC
+        ov_mask_b = (sub["fc_qty"]    > 0) & (sub["sfc_qty"]    > 0)
+        ov_mask_a = (sub["fc_ideal"]  > 0) & (sub["sfc_ideal"]  > 0)
+        ov_qty_b  = int(sub.loc[ov_mask_b, "fc_qty"].sum()    + sub.loc[ov_mask_b, "sfc_qty"].sum())
+        ov_qty_a  = int(sub.loc[ov_mask_a, "fc_ideal"].sum()  + sub.loc[ov_mask_a, "sfc_ideal"].sum())
+        ov_vol_b  = sub.loc[ov_mask_b, "fc_vol_now"].sum()   + sub.loc[ov_mask_b, "sfc_vol_now"].sum()
+        ov_vol_a  = sub.loc[ov_mask_a, "fc_vol_ideal"].sum() + sub.loc[ov_mask_a, "sfc_vol_ideal"].sum()
+        ov_qty_d  = ov_qty_a - ov_qty_b
+        ov_vol_d  = ov_vol_a - ov_vol_b
+
+        # total (FC + SFC combined)
+        tot_qty_b = fc_b  + sfc_b;   tot_qty_a = fc_a  + sfc_a
+        tot_vol_b = fc_vb + sfc_vb;  tot_vol_a = fc_va + sfc_va
+        tot_qty_d = tot_qty_a - tot_qty_b
+        tot_vol_d = tot_vol_a - tot_vol_b
+        tot_qty_dclr = "#27ae60" if tot_qty_d > 0 else "#e74c3c" if tot_qty_d < 0 else "#aaa"
+        tot_vol_dclr = "#27ae60" if tot_vol_d > 0 else "#e74c3c" if tot_vol_d < 0 else "#aaa"
+        tot_qty_arr  = "▲" if tot_qty_d > 0 else "▼" if tot_qty_d < 0 else "─"
+        tot_vol_arr  = "▲" if tot_vol_d > 0 else "▼" if tot_vol_d < 0 else "─"
+
         qty_dclr_fc  = "#27ae60" if fd>0 else "#e74c3c" if fd<0 else "#aaa"
         qty_dclr_sfc = "#27ae60" if sd>0 else "#e74c3c" if sd<0 else "#aaa"
         qty_arr_fc   = "▲" if fd>0 else "▼" if fd<0 else "─"
@@ -1908,53 +1933,58 @@ with page_compare:
         vol_arr_sfc  = "▲" if svd>0 else "▼" if svd<0 else "─"
 
         col.markdown(f"""
-        <div style="border:2px solid {color};border-radius:12px;padding:16px 18px">
-          <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+        <div style="border:2px solid {color};border-radius:12px;padding:18px 20px">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
             <span style="background:{color};color:#fff;border-radius:6px;
-                  padding:4px 14px;font-size:1rem;font-weight:700">{seg}</span>
-            <span style="color:#777;font-size:.95rem">{n:,} SKUs total</span>
+                  padding:4px 14px;font-size:1.05rem;font-weight:700">{seg}</span>
+            <span style="color:#555;font-size:1.05rem;font-weight:600">{n:,} SKUs total</span>
           </div>
-          <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;
-               color:#bbb;margin-bottom:8px">SKU Location (Before → After)</div>
+          <div style="font-size:.88rem;font-weight:700;color:#555;text-transform:uppercase;
+               letter-spacing:.05em;margin-bottom:8px">SKU Location (Before → After)
+          </div>
           {loc_row("FC",      d_rows)}
           {loc_row("SFC",     d_rows)}
           {loc_row("Overlap", d_rows)}
           <div style="margin-top:14px;padding-top:12px;border-top:2px solid #f4f4f4">
-            <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;
-                 color:#bbb;margin-bottom:8px">Inventory Qty (Before → After)</div>
+            <div style="font-size:.88rem;font-weight:700;color:#555;text-transform:uppercase;
+                 letter-spacing:.05em;margin-bottom:8px">Inventory Qty (Before → After)
+              <span style="font-weight:400;color:#888;text-transform:none;letter-spacing:0;margin-left:6px">Total {tot_qty_b:,} qty</span>
+            </div>
             <div style="display:flex;gap:16px">
               <div style="flex:1">
-                <div style="font-size:.75rem;color:#888;margin-bottom:3px">🏭 FC</div>
+                <div style="font-size:.85rem;color:#666;margin-bottom:3px">🏭 FC</div>
                 <div style="font-size:1rem;font-weight:700;color:#222">
-                  {fc_b:,}<span style="font-size:.85rem;color:#bbb"> → </span>{fc_a:,}</div>
-                <div style="font-size:.88rem;font-weight:700;color:{qty_dclr_fc};margin-top:2px">
+                  {fc_b:,}<span style="font-size:.88rem;color:#bbb"> → </span>{fc_a:,}</div>
+                <div style="font-size:.9rem;font-weight:700;color:{qty_dclr_fc};margin-top:2px">
                   {qty_arr_fc} {abs(fd):,}</div>
               </div>
               <div style="flex:1">
-                <div style="font-size:.75rem;color:#888;margin-bottom:3px">🏬 SFC</div>
+                <div style="font-size:.85rem;color:#666;margin-bottom:3px">🏬 SFC</div>
                 <div style="font-size:1rem;font-weight:700;color:#222">
-                  {sfc_b:,}<span style="font-size:.85rem;color:#bbb"> → </span>{sfc_a:,}</div>
-                <div style="font-size:.88rem;font-weight:700;color:{qty_dclr_sfc};margin-top:2px">
+                  {sfc_b:,}<span style="font-size:.88rem;color:#bbb"> → </span>{sfc_a:,}</div>
+                <div style="font-size:.9rem;font-weight:700;color:{qty_dclr_sfc};margin-top:2px">
                   {qty_arr_sfc} {abs(sd):,}</div>
               </div>
             </div>
           </div>
           <div style="margin-top:10px;padding-top:10px;border-top:1px solid #f4f4f4">
-            <div style="font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;
-                 color:#bbb;margin-bottom:8px">Volume in³ (Before → After)</div>
+            <div style="font-size:.88rem;font-weight:700;color:#555;text-transform:uppercase;
+                 letter-spacing:.05em;margin-bottom:8px">Volume in³ (Before → After)
+              <span style="font-weight:400;color:#888;text-transform:none;letter-spacing:0;margin-left:6px">Total {tot_vol_b/1000:,.0f}K in³</span>
+            </div>
             <div style="display:flex;gap:16px">
               <div style="flex:1">
-                <div style="font-size:.75rem;color:#888;margin-bottom:3px">🏭 FC</div>
-                <div style="font-size:.9rem;font-weight:600;color:#333">
-                  {fc_vb/1000:,.0f}K<span style="font-size:.8rem;color:#bbb"> → </span>{fc_va/1000:,.0f}K</div>
-                <div style="font-size:.82rem;font-weight:700;color:{vol_dclr_fc};margin-top:2px">
+                <div style="font-size:.85rem;color:#666;margin-bottom:3px">🏭 FC</div>
+                <div style="font-size:1rem;font-weight:700;color:#222">
+                  {fc_vb/1000:,.0f}K<span style="font-size:.88rem;color:#bbb"> → </span>{fc_va/1000:,.0f}K</div>
+                <div style="font-size:.9rem;font-weight:700;color:{vol_dclr_fc};margin-top:2px">
                   {vol_arr_fc} {abs(fvd)/1000:,.0f}K</div>
               </div>
               <div style="flex:1">
-                <div style="font-size:.75rem;color:#888;margin-bottom:3px">🏬 SFC</div>
-                <div style="font-size:.9rem;font-weight:600;color:#333">
-                  {sfc_vb/1000:,.0f}K<span style="font-size:.8rem;color:#bbb"> → </span>{sfc_va/1000:,.0f}K</div>
-                <div style="font-size:.82rem;font-weight:700;color:{vol_dclr_sfc};margin-top:2px">
+                <div style="font-size:.85rem;color:#666;margin-bottom:3px">🏬 SFC</div>
+                <div style="font-size:1rem;font-weight:700;color:#222">
+                  {sfc_vb/1000:,.0f}K<span style="font-size:.88rem;color:#bbb"> → </span>{sfc_va/1000:,.0f}K</div>
+                <div style="font-size:.9rem;font-weight:700;color:{vol_dclr_sfc};margin-top:2px">
                   {vol_arr_sfc} {abs(svd)/1000:,.0f}K</div>
               </div>
             </div>
@@ -1963,61 +1993,95 @@ with page_compare:
 
     st.divider()
 
-    # ── Section 3: SKU Distribution — Before vs After ─────
-    st.markdown("#### SKU Distribution — Before vs After")
+    # ── Section 3: Distribution — Before vs After ─────────
+    _h1, _h2 = st.columns([3, 1])
+    _h1.markdown("#### Distribution — Before vs After")
+    dist_metric = _h2.selectbox(
+        "metric", ["SKU Count", "Inventory Qty", "Volume in³"],
+        key="dist_metric", label_visibility="collapsed"
+    )
 
     ov_rows = dist_table(dists)
 
+    # build y values based on selected metric
+    if dist_metric == "SKU Count":
+        y_before = [r["before"] for r in ov_rows]
+        y_after  = [r["after"]  for r in ov_rows]
+        y_title  = "SKU Count"
+        fmt      = lambda v: f"{int(v):,}"
+    elif dist_metric == "Inventory Qty":
+        def _qty(zone, when):
+            col_fc  = "fc_qty"   if when == "before" else "fc_ideal"
+            col_sfc = "sfc_qty"  if when == "before" else "sfc_ideal"
+            if zone == "FC":      return int(dists[col_fc].sum())
+            if zone == "SFC":     return int(dists[col_sfc].sum())
+            # Overlap = SKUs in both
+            mask = (dists[col_fc] > 0) & (dists[col_sfc] > 0)
+            return int(dists.loc[mask, col_fc].sum() + dists.loc[mask, col_sfc].sum())
+        y_before = [_qty(r["loc"], "before") for r in ov_rows]
+        y_after  = [_qty(r["loc"], "after")  for r in ov_rows]
+        y_title  = "Qty"
+        fmt      = lambda v: f"{int(v):,}"
+    else:  # Volume
+        def _vol(zone, when):
+            col_fc  = "fc_vol_now"   if when == "before" else "fc_vol_ideal"
+            col_sfc = "sfc_vol_now"  if when == "before" else "sfc_vol_ideal"
+            if zone == "FC":      return dists[col_fc].sum()
+            if zone == "SFC":     return dists[col_sfc].sum()
+            mask = (dists["fc_qty"] > 0) & (dists["sfc_qty"] > 0) if when == "before" \
+                   else (dists["fc_ideal"] > 0) & (dists["sfc_ideal"] > 0)
+            return dists.loc[mask, col_fc].sum() + dists.loc[mask, col_sfc].sum()
+        y_before = [_vol(r["loc"], "before") / 1000 for r in ov_rows]
+        y_after  = [_vol(r["loc"], "after")  / 1000 for r in ov_rows]
+        y_title  = "Volume (K in³)"
+        fmt      = lambda v: f"{v:,.0f}K"
+
+    x_labels = [f"{_LOC_ICONS[r['loc']]} {r['loc']}" for r in ov_rows]
+    colors   = [_LOC_HEX[r["loc"]] for r in ov_rows]
+
     fig_ba = go.Figure()
     fig_ba.add_trace(go.Bar(
-        name="Before",
-        x=[f"{_LOC_ICONS[r['loc']]} {r['loc']}" for r in ov_rows],
-        y=[r["before"] for r in ov_rows],
-        marker_color=[_LOC_HEX[r["loc"]] for r in ov_rows],
-        opacity=0.45,
-        text=[f"{r['before']:,}" for r in ov_rows],
-        textposition="outside",
-        textfont=dict(size=13),
+        name="Before", x=x_labels, y=y_before,
+        marker_color=colors, opacity=0.4,
+        text=[fmt(v) for v in y_before],
+        textposition="outside", textfont=dict(size=14, color="#444"),
     ))
     fig_ba.add_trace(go.Bar(
-        name="After",
-        x=[f"{_LOC_ICONS[r['loc']]} {r['loc']}" for r in ov_rows],
-        y=[r["after"] for r in ov_rows],
-        marker_color=[_LOC_HEX[r["loc"]] for r in ov_rows],
-        opacity=1.0,
-        text=[f"{r['after']:,}" for r in ov_rows],
-        textposition="outside",
-        textfont=dict(size=13, color="#222"),
+        name="After", x=x_labels, y=y_after,
+        marker_color=colors, opacity=1.0,
+        text=[fmt(v) for v in y_after],
+        textposition="outside", textfont=dict(size=14, color="#222"),
     ))
     fig_ba.update_layout(
-        barmode="group", height=320,
-        margin=dict(t=20, b=40, l=0, r=0),
+        barmode="group", height=420,
+        margin=dict(t=55, b=40, l=0, r=0),
         plot_bgcolor="white",
-        yaxis=dict(showgrid=True, gridcolor="#f0f0f0", title="SKU Count", tickformat=","),
-        xaxis=dict(showgrid=False, tickfont=dict(size=13)),
-        legend=dict(orientation="h", x=1, xanchor="right", y=1.08, font=dict(size=13)),
+        yaxis=dict(showgrid=True, gridcolor="#e0e0e0", title=y_title,
+                   tickformat=",", tickfont=dict(size=13, color="#444")),
+        xaxis=dict(showgrid=False, tickfont=dict(size=15, color="#333")),
+        legend=dict(orientation="h", x=1, xanchor="right", y=1.08, font=dict(size=14, color="#333")),
         bargap=0.35, bargroupgap=0.05,
     )
     st.plotly_chart(fig_ba, use_container_width=True)
 
+    # summary row under chart
     dcols = st.columns(len(ov_rows))
-    for col, row in zip(dcols, ov_rows):
+    for col, row, yb, ya in zip(dcols, ov_rows, y_before, y_after):
         loc   = row["loc"]
-        b, a  = row["before"], row["after"]
-        delta = row["delta"]
+        delta = ya - yb
         dclr  = "#27ae60" if delta>0 else "#e74c3c" if delta<0 else "#aaa"
         arr   = "▲" if delta>0 else "▼" if delta<0 else "─"
         col.markdown(f"""
         <div style="border-top:3px solid {_LOC_HEX[loc]};padding:10px 4px 4px 4px;text-align:center">
-          <div style="font-size:.82rem;color:#666;margin-bottom:6px;font-weight:600">
+          <div style="font-size:.85rem;color:#666;margin-bottom:6px;font-weight:600">
             {_LOC_ICONS[loc]} {loc}</div>
-          <div style="font-size:.9rem;color:#444">
-            <span style="opacity:.6">{b:,}</span>
+          <div style="font-size:.92rem;color:#444">
+            <span style="opacity:.6">{fmt(yb)}</span>
             <span style="color:#ddd;padding:0 5px">→</span>
-            <span style="font-weight:700;color:#222">{a:,}</span>
+            <span style="font-weight:700;color:#222">{fmt(ya)}</span>
           </div>
-          <div style="font-size:.9rem;font-weight:700;color:{dclr};margin-top:4px">
-            {arr} {abs(delta):,}</div>
+          <div style="font-size:.92rem;font-weight:700;color:{dclr};margin-top:4px">
+            {arr} {fmt(abs(delta))}</div>
         </div>""", unsafe_allow_html=True)
 
     st.divider()

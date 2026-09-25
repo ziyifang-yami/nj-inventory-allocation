@@ -146,8 +146,8 @@ for _, row in df.iterrows():
         if adl > 0 and (pd.isna(fc_d2s) or fc_d2s < P["top_trigger_d2s"]):
             needed = max(0.0, target_qty - fc)
             avail  = sfc
-            if needed > 0 and avail > 0:
-                xfer         = min(needed, avail)
+            if avail > 0:
+                xfer         = avail  # TOP: full transfer back, regardless of needed
                 action       = "DC_TO_FC"
                 direction    = "SFC→FC"
                 transfer_qty = round(xfer, 0)
