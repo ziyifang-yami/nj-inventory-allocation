@@ -77,6 +77,7 @@ TARGETS = {"SKU %": 10.2, "OL %": 70.2, "Units %": 77.7, "CBI %": 80.4}
 
 # ── Load ─────────────────────────────────────────────────────
 @st.cache_data(ttl=1800)   # 30分钟缓存 — 实时库存
+@st.cache_data(ttl=1800, show_spinner=False)  # 30分钟缓存
 def load_inventory():
     """Real-time FC/SFC inventory from MySQL — overwrites CSV qty."""
     import os
@@ -133,7 +134,7 @@ def load_inventory():
     except Exception as e:
         return None, str(e)
 
-@st.cache_data(ttl=1800)  # 30分钟自动刷新
+@st.cache_data(ttl=1800, show_spinner=False)  # 30分钟自动刷新
 def load_capacity():
     """实时从 MySQL 读取 FC/SFC 容量数据"""
     import os
@@ -206,13 +207,37 @@ def load_capacity():
     except Exception as e:
         return None, str(e)
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=43200, show_spinner=False)  # 12小时内存缓存
 def load():
     """
-    Sales/AOD data from Athena (rolling 30 inv-days) — live on server.
-    Falls back to latest CSV if Athena unavailable.
+    Sales/AOD data — disk cache first (results/athena_cache.csv),
+    refreshes if cache is older than 12h or missing.
+    Falls back to latest segment CSV if Athena unavailable.
     """
     import glob, re, os, time, boto3
+    from datetime import datetime
+    from pathlib import Path
+
+    _load_env()
+
+    # ── Disk cache check ──────────────────────────────────────
+    CACHE_FILE = Path("results/athena_cache.csv")
+    CACHE_TS_FILE = Path("results/athena_cache_ts.txt")
+    cache_max_age_h = 12  # 超过12小时强刷
+
+    if CACHE_FILE.exists() and CACHE_TS_FILE.exists():
+        try:
+            cached_ts = datetime.fromisoformat(CACHE_TS_FILE.read_text().strip())
+            age_h = (datetime.now() - cached_ts).total_seconds() / 3600
+            if age_h < cache_max_age_h:
+                df = pd.read_csv(CACHE_FILE)
+                from zoneinfo import ZoneInfo
+                cached_nj = cached_ts.astimezone(ZoneInfo("America/New_York"))
+                ts = cached_nj.strftime("updated %Y-%m-%d %H:%M ET")
+                return df, ts
+        except Exception:
+            pass  # corrupt cache, fall through to re-query
+
     try:
         _load_env()
         # Use AWS_PROFILE env var if set, otherwise try 'athena-prod' (EC2 role, no expiry)
@@ -315,7 +340,19 @@ def load():
         df["unit_volume_cbm"] = df["unit_volume_cbm"].fillna(0)
         df["avg_daily_sales"] = df["sales_units_30d"] / 30
         df["daily_sales_cbm"] = df["avg_daily_sales"] * df["unit_volume_cbm"]
-        ts = "live (Athena)"
+        now = datetime.now()
+        from zoneinfo import ZoneInfo
+        now_nj = datetime.now(ZoneInfo("America/New_York"))
+        ts = now_nj.strftime("updated %Y-%m-%d %H:%M ET")
+
+        # ── Save to disk cache ────────────────────────────────
+        try:
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            df.to_csv(CACHE_FILE, index=False)
+            CACHE_TS_FILE.write_text(now.isoformat())
+        except Exception:
+            pass  # cache write failure is non-fatal
+
         return df, ts
 
     except Exception as e:
@@ -327,8 +364,7 @@ def load():
         df = pd.read_csv(latest)
         m = re.search(r"(\d{8})_(\d{4})", latest)
         ts = (f"{m.group(1)[:4]}-{m.group(1)[4:6]}-{m.group(1)[6:8]} "
-              f"{m.group(2)[:2]}:{m.group(2)[2:]} [CSV fallback, Athena: {e}]") if m else f"CSV fallback ({e})"
-        return df, ts
+              f"{m.group(2)[:2]}:{m.group(2)[2:]} (CSV)") if m else "CSV"
 
 def load_middle_locations(skus):
     """Real-time: fetch FC lot data for MIDDLE FC→DC SKUs from MySQL."""
@@ -1082,11 +1118,12 @@ def calc_ideal(df_in, aod_top, ol_top, ol_tail,
         })
     return pd.DataFrame(rows)
 
-df, DATA_TS = load()
+st.markdown("## NJ Segment Simulator")
+
+with st.spinner("Loading data..."):
+    df, DATA_TS = load()
 
 # ── 实时库存覆盖 CSV qty（MySQL 实时）────────────────────────
-# 以库存为主表：库存有的SKU全部保留，销售数据没有的填0
-# 这样 N = 物理货架上有库存的SKU数，而不是被Athena销售数据限制
 df_inv_rt, inv_err = load_inventory()
 if df_inv_rt is not None:
     df["item_number"]     = df["item_number"].astype(str)
@@ -1128,8 +1165,10 @@ TC  = 0
 # ── Sidebar ──────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🎛 Tier Thresholds")
+    if st.button("🔄 Refresh Data", key="refresh_btn", help="Re-query Athena and reload inventory"):
+        _do_refresh()
+        st.rerun()
     st.markdown("---")
-
     # ── Session state init ──────────────────────────────────
     if "aod_top_val" not in st.session_state: st.session_state.aod_top_val = 21
     if "ol_top_val"  not in st.session_state: st.session_state.ol_top_val  = 100
@@ -1224,12 +1263,25 @@ def stats(seg):
 T = stats("TOP"); M = stats("MIDDLE"); TL = stats("TAIL")
 
 # ── Header ────────────────────────────────────────────────────
-st.markdown("## NJ Segment Simulator")
-st.markdown(f"<span style='color:#999;font-size:.9rem'>"
-            f"In-stock SKUs: {N:,} &nbsp;|&nbsp; "
-            f"Sales data: {DATA_TS} &nbsp;|&nbsp; "
-            f"Inventory: {'🟢 Live' if INV_TS == 'live' else '🟡 ' + INV_TS}"
-            f"</span>", unsafe_allow_html=True)
+_inv_status = '🟢 Live' if INV_TS == 'live' else '🟡 ' + INV_TS
+
+def _do_refresh():
+    from pathlib import Path
+    Path("results/athena_cache.csv").unlink(missing_ok=True)
+    Path("results/athena_cache_ts.txt").unlink(missing_ok=True)
+    load.clear()
+    load_inventory.clear()
+    st.session_state.pop("df_ideal", None)
+    st.session_state.pop("_ideal_cache_key", None)
+
+st.markdown(
+    f"<span style='color:#999;font-size:.9rem'>"
+    f"In-stock SKUs: {N:,} &nbsp;|&nbsp; "
+    f"Sales data: {DATA_TS} &nbsp;|&nbsp; "
+    f"Inventory: {_inv_status}"
+    f"</span>",
+    unsafe_allow_html=True
+)
 
 # ── Top-level page tabs ───────────────────────────────────────
 page_overview, page_zone, page_compare, page_capacity, page_planning = st.tabs([
