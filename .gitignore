@@ -27,3 +27,14 @@ Thumbs.db
 
 # Exploration scratch files
 explore/
+
+# Temporary diagnostic / helper scripts
+_*.py
+_*.txt
+_*.bat
+*.pyc
+
+# Server pull copies (not source of truth)
+v3_FC_segment/app_server.py
+v3_FC_segment/app_server_latest.py
+v3_FC_segment/app_951106f.py

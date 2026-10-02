@@ -1457,23 +1457,34 @@ with page_zone:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT
-                        wit.item_number,
-                        CASE WHEN wsl.zone_id = 2 THEN 'SFC' ELSE 'FC' END AS zone,
-                        wit.location_no,
+                        wsli.item_number,
+                        CASE
+                            WHEN wsli.location_no LIKE 'S%%'
+                              OR wsli.location_no LIKE 'DC%%'
+                            THEN 'SFC'
+                            ELSE 'FC'
+                        END AS zone,
+                        wsli.location_no,
                         wsl.location_type,
                         wit.quantity AS qty,
                         COALESCE(wwg.volume, 0) AS unit_volume_cbm
-                    FROM yamibuy_wh.wh_inventory_transaction wit
+                    FROM yamibuy_wh.wh_storage_location_item wsli
+                    JOIN yamibuy_wh.wh_inventory_transaction wit
+                        ON wit.item_number      = wsli.item_number
+                       AND wit.warehouse_number = wsli.warehouse_number
+                       AND wit.location_no      = wsli.location_no
                     JOIN yamibuy_wh.wh_storage_location wsl
-                        ON wsl.location_no = wit.location_no
-                       AND wsl.warehouse_number = wit.warehouse_number
-                    LEFT JOIN yamibuy_im.im_item ii ON ii.item_number = wit.item_number
+                        ON wsl.location_no      = wsli.location_no
+                       AND wsl.warehouse_number = wsli.warehouse_number
+                    LEFT JOIN yamibuy_im.im_item ii ON ii.item_number = wsli.item_number
                     LEFT JOIN yamibuy_master.xysc_wearhouse_goods wwg ON wwg.goods_id = ii.goods_id
-                    WHERE wit.warehouse_number = '002'
-                      AND wit.quantity > 0
+                    WHERE wsli.warehouse_number = '002'
+                      AND wit.quantity IS NOT NULL
+                      AND wit.quantity != 0
                       AND wsl.location_type IN (3, 4)
-                      AND wsl.zone_id IN (1, 2)
-                      AND (wit.item_number LIKE '1%%' OR wit.item_number LIKE '5%%')
+                      AND wsl.size_id NOT IN (13, 33)
+                      AND IFNULL(ii.business_type, 0) != 8
+                      AND (wsli.item_number LIKE '1%%' OR wsli.item_number LIKE '5%%')
                 """)
                 cols = [d[0] for d in cur.description]
                 rows = cur.fetchall()
@@ -1841,7 +1852,177 @@ with page_compare:
 
     st.divider()
 
-    # ── Section 3: Distribution — Before vs After ─────────
+    # ── Section 3: Overall Inventory Shift ────────────────
+    st.markdown("#### Overall Inventory Shift")
+
+    fc_now    = int(df_ideal["fc_qty"].sum())
+    fc_after  = int(df_ideal["fc_ideal"].sum())
+    sfc_now   = int(df_ideal["sfc_qty"].sum())
+    sfc_after = int(df_ideal["sfc_ideal"].sum())
+
+    fc_sku_b  = int((df_ideal["fc_qty"]>0).sum())
+    fc_sku_a  = int((df_ideal["fc_ideal"]>0).sum())
+    sfc_sku_b = int((df_ideal["sfc_qty"]>0).sum())
+    sfc_sku_a = int((df_ideal["sfc_ideal"]>0).sum())
+
+    fc_vol_b  = df_ideal["fc_vol_now"].sum()
+    fc_vol_a  = df_ideal["fc_vol_ideal"].sum()
+    sfc_vol_b = df_ideal["sfc_vol_now"].sum()
+    sfc_vol_a = df_ideal["sfc_vol_ideal"].sum()
+
+    def _fmt_num(v):
+        if abs(v) >= 1_000_000: return f"{v/1_000_000:.1f}M"
+        if abs(v) >= 1_000:     return f"{v/1_000:.0f}K"
+        return f"{int(v):,}"
+
+    def _fmt_sku(v):   return f"{int(v):,}"
+    def _fmt_qty(v):   return f"{int(v):,}"
+    def _fmt_vol(v):
+        if abs(v) >= 1_000_000: return f"{v/1_000_000:.1f}M"
+        if abs(v) >= 1_000:     return f"{v/1_000:.0f}K"
+        return f"{v:.0f}"
+
+    dc_to_fc = df_ideal[df_ideal["action"]=="DC_TO_FC"]
+    fc_to_dc = df_ideal[df_ideal["action"]=="FC_TO_DC"]
+
+    out_qty = int(fc_to_dc["transfer_qty"].sum())
+    out_sku = len(fc_to_dc)
+    out_vol = float(fc_to_dc["fc_vol_now"].sum() - fc_to_dc["fc_vol_ideal"].sum())
+
+    in_qty  = int(dc_to_fc["transfer_qty"].sum())
+    in_sku  = len(dc_to_fc)
+    in_vol  = float(dc_to_fc["fc_vol_ideal"].sum() - dc_to_fc["fc_vol_now"].sum())
+
+    st.markdown("""
+    <style>
+    @keyframes flow-r { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -30; } }
+    @keyframes flow-l { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -30; } }
+    .ois2 { border-radius:16px; border:1.5px solid #e8eaf0; padding:28px 36px;
+            background:#fff; box-shadow:0 2px 12px rgba(0,0,0,.05); }
+    .ois2-hdr { display:flex; align-items:center; padding-bottom:14px;
+                border-bottom:2px solid #f0f0f0; margin-bottom:4px; }
+    .ois2-row { display:flex; align-items:center; padding:18px 0;
+                border-bottom:1px solid #f4f4f4; }
+    .ois2-row:last-child { border-bottom:none; }
+    .ois2-dim { width:80px; font-size:.82rem; font-weight:700; color:#bbb;
+                text-transform:uppercase; letter-spacing:.07em; }
+    .ois2-zone { flex:1; text-align:center; }
+    .ois2-b { font-size:.9rem; font-weight:400; color:#888; }
+    .ois2-a { font-size:1.8rem; font-weight:800; color:#222; line-height:1.1; margin-top:2px; }
+    .ois2-mid { width:260px; display:flex; flex-direction:column;
+                align-items:center; gap:6px; }
+    .ois2-arrow-row { display:flex; align-items:center; gap:8px; width:100%; }
+    .ois2-badge-red  { font-size:.85rem; font-weight:700; background:#fde8e8;
+                       color:#e74c3c; border-radius:99px; padding:3px 12px;
+                       white-space:nowrap; flex-shrink:0; }
+    .ois2-badge-grn  { font-size:.85rem; font-weight:700; background:#e8f8f0;
+                       color:#27ae60; border-radius:99px; padding:3px 12px;
+                       white-space:nowrap; flex-shrink:0; }
+    </style>
+    """, unsafe_allow_html=True)
+
+    def _arr_r(label):
+        return (
+            f"<div style='display:flex;flex-direction:column;align-items:center;gap:2px;width:100%'>"
+            f"  <span style='font-size:.85rem;font-weight:700;color:#e74c3c'>{label}</span>"
+            f"  <svg width='200' height='16' viewBox='0 0 200 16' xmlns='http://www.w3.org/2000/svg'>"
+            f"  <defs><marker id='mr' markerWidth='6' markerHeight='6' refX='3' refY='3' orient='auto'>"
+            f"  <path d='M0,0 L6,3 L0,6 Z' fill='#e74c3c'/></marker></defs>"
+            f"  <line x1='2' y1='8' x2='188' y2='8' stroke='#e74c3c' stroke-width='2.5' "
+            f"  stroke-dasharray='10,5' marker-end='url(#mr)' style='animation:flow-r 0.9s linear infinite'/>"
+            f"  </svg>"
+            f"</div>"
+        )
+
+    def _arr_l(label):
+        return (
+            f"<div style='display:flex;flex-direction:column;align-items:center;gap:2px;width:100%'>"
+            f"  <span style='font-size:.85rem;font-weight:700;color:#27ae60'>{label}</span>"
+            f"  <svg width='200' height='16' viewBox='0 0 200 16' xmlns='http://www.w3.org/2000/svg'>"
+            f"  <defs><marker id='mg' markerWidth='6' markerHeight='6' refX='3' refY='3' orient='auto'>"
+            f"  <path d='M0,0 L6,3 L0,6 Z' fill='#27ae60'/></marker></defs>"
+            f"  <line x1='198' y1='8' x2='12' y2='8' stroke='#27ae60' stroke-width='2.5' "
+            f"  stroke-dasharray='10,5' marker-end='url(#mg)' style='animation:flow-l 0.9s linear infinite'/>"
+            f"  </svg>"
+            f"</div>"
+        )
+
+    rows_data = [
+        ("SKUs",   fc_sku_b, fc_sku_a, out_sku, sfc_sku_b, sfc_sku_a, in_sku, _fmt_sku),
+        ("Qty",    fc_now,   fc_after, out_qty, sfc_now,   sfc_after,  in_qty, _fmt_qty),
+        ("Volume", fc_vol_b, fc_vol_a, out_vol, sfc_vol_b, sfc_vol_a,  in_vol, _fmt_vol),
+    ]
+
+    hdr = (
+        "<div class='ois2-hdr'>"
+        "  <div class='ois2-dim'></div>"
+        "  <div style='flex:1;text-align:center;font-size:1rem;font-weight:700;color:#444'>🏭 FC</div>"
+        "  <div style='width:260px'></div>"
+        "  <div style='flex:1;text-align:center;font-size:1rem;font-weight:700;color:#444'>🏬 SFC</div>"
+        "</div>"
+    )
+
+    body = ""
+    for dim, fc_b, fc_a, out_v, sfc_b, sfc_a, in_v, fmt in rows_data:
+        body += (
+            f"<div class='ois2-row'>"
+            f"  <div class='ois2-dim'>{dim}</div>"
+            f"  <div class='ois2-zone'>"
+            f"    <div class='ois2-b'>{fmt(fc_b)}</div>"
+            f"    <div class='ois2-a'>{fmt(fc_a)}</div>"
+            f"  </div>"
+            f"  <div class='ois2-mid' style='width:260px;gap:8px'>"
+            f"    {_arr_r(fmt(out_v))}"
+            f"    {_arr_l(fmt(in_v))}"
+            f"  </div>"
+            f"  <div class='ois2-zone'>"
+            f"    <div class='ois2-b'>{fmt(sfc_b)}</div>"
+            f"    <div class='ois2-a'>{fmt(sfc_a)}</div>"
+            f"  </div>"
+            f"</div>"
+        )
+
+    st.markdown(f"<div class='ois2'>{hdr}{body}</div>", unsafe_allow_html=True)
+
+    with st.expander("🔍 FC Capacity Check (click to load)", expanded=False):
+        df_cap, cap_err = load_capacity()
+        if df_cap is not None:
+            fc_cap  = df_cap[df_cap["zone"]=="FC"]["allowable_cap"].sum()
+            fc_used = df_cap[df_cap["zone"]=="FC"]["used_volume"].sum()
+            fc_free = fc_cap - fc_used
+            fc_inbound_vol = max(0, fc_vol_a - fc_vol_b)
+            fc_free_after  = fc_free - fc_inbound_vol
+            util_before    = fc_used / max(fc_cap, 1) * 100
+            util_after     = (fc_used + fc_inbound_vol) / max(fc_cap, 1) * 100
+            feasible       = fc_free_after >= 0
+            status_color = "#27ae60" if feasible else "#e74c3c"
+            status_icon  = "✅" if feasible else "⚠️"
+            status_text  = "Feasible" if feasible else "Capacity Risk"
+            def _fv(v): return f"{v/1_000_000:.1f}M in³" if abs(v)>=1e6 else f"{v/1_000:.0f}K in³"
+            st.markdown(f"""
+            <div style="border:1.5px solid {status_color}33;border-radius:12px;
+                 padding:16px 24px;background:#fafafa">
+              <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                <span style="font-size:1.1rem;font-weight:700;color:#333">
+                  {status_icon} {status_text}</span>
+              </div>
+              <div style="display:flex;gap:32px;flex-wrap:wrap">
+                <div><div style="font-size:.72rem;color:#aaa">FC Allowable Cap</div>
+                     <div style="font-size:1.2rem;font-weight:700">{_fv(fc_cap)}</div></div>
+                <div><div style="font-size:.72rem;color:#aaa">Currently Used</div>
+                     <div style="font-size:1.2rem;font-weight:700">{_fv(fc_used)} ({util_before:.1f}%)</div></div>
+                <div><div style="font-size:.72rem;color:#aaa">Need to Move In</div>
+                     <div style="font-size:1.2rem;font-weight:700;color:#3d6fbe">{_fv(fc_inbound_vol)}</div></div>
+                <div><div style="font-size:.72rem;color:#aaa">Free After Transfer</div>
+                     <div style="font-size:1.2rem;font-weight:700;color:{status_color}">{_fv(fc_free_after)} ({util_after:.1f}%)</div></div>
+              </div>
+            </div>""", unsafe_allow_html=True)
+        elif cap_err:
+            st.caption(f"⚠️ {cap_err[:80]}")
+
+    st.divider()
+
+    # ── Section 4: Distribution — Before vs After ─────────
     _h1, _h2 = st.columns([3, 1])
     _h1.markdown("#### Distribution — Before vs After")
     dist_metric = _h2.selectbox(
