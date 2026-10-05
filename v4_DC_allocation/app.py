@@ -1094,100 +1094,69 @@ with tab_compare:
 
 
 
-# TAB 3 — FC → SFC Plan
+# TAB 3 — FC → SFC Plan  (reads from SQLite cache built by refresh_sfc_cache.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_fc2sfc:
-    st.markdown("### FC → SFC Transfer Plan")
+    from cache_db import CacheDB as _CacheDB2
+    _db2     = _CacheDB2("results/sfc_cache.db")
+    _df_mid  = _db2.read_fc2sfc_task("MIDDLE_EVICT")
+    _df_tail = _db2.read_fc2sfc_task("TAIL_CLEAR")
 
-    cfg = dict(P)  # use defaults; Threshold Simulator doesn't change operational params
+    # Summary metrics
+    _t = compute_fc_to_sfc(df, dict(P))
+    _n_mid  = len(_t[_t["trigger"]=="MIDDLE_EVICT"]) if not _t.empty and "trigger" in _t.columns else 0
+    _n_tail = len(_t[_t["trigger"]=="TAIL_CLEAR"])   if not _t.empty and "trigger" in _t.columns else 0
+    _m1, _m2, _m3, _m4 = st.columns(4)
+    _m1.metric("📤 MIDDLE Evict SKUs", f"{_n_mid:,}")
+    _m2.metric("🗑️ TAIL Clear SKUs",  f"{_n_tail:,}")
+    _m3.metric("📦 MIDDLE Evict Rows", f"{len(_df_mid):,}")
+    _m4.metric("📦 TAIL Clear Rows",   f"{len(_df_tail):,}")
+    st.divider()
 
-    df_triggered = compute_fc_to_sfc(df, cfg)
+    _fc2sfc_mid_tab, _fc2sfc_tail_tab = st.tabs([
+        f"📤 MIDDLE Evict — FC→SFC  ({len(_df_mid):,} rows)",
+        f"🗑️ TAIL Clear — FC→SFC  ({len(_df_tail):,} rows)",
+    ])
 
-    if df_triggered.empty:
-        df_mid_trigger = pd.DataFrame()
-        df_tail_trigger = pd.DataFrame()
-    else:
-        df_mid_trigger  = df_triggered[df_triggered["trigger"] == "MIDDLE_EVICT"].copy() \
-            if "trigger" in df_triggered.columns else pd.DataFrame()
-        df_tail_trigger = df_triggered[df_triggered["trigger"] == "TAIL_CLEAR"].copy() \
-            if "trigger" in df_triggered.columns else pd.DataFrame()
+    _FC_COLS = ["item_number","location_no","loc_type","qty_to_transfer","qty",
+                "exp_date","fc_d2s","avg_daily_orders","excess_qty","rule"]
 
-    fc2sfc_mid_tab, fc2sfc_tail_tab = st.tabs(["MIDDLE Evict List", "TAIL Clear List"])
+    def _render_fc2sfc(tab, tdf, key, caption_txt):
+        with tab:
+            st.caption(caption_txt)
+            if tdf is None or tdf.empty:
+                st.info("No tasks. Run the refresh script or click Refresh All in the sidebar.")
+                return
+            cols = [c for c in _FC_COLS if c in tdf.columns]
+            tdf = tdf[cols].copy()
+            for c in ["qty_to_transfer","qty","fc_d2s","avg_daily_orders","excess_qty"]:
+                if c in tdf.columns:
+                    tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
+            _fc1, _fc2 = st.columns([2,1])
+            with _fc1:
+                _s = st.text_input("🔍 Item Number", key=f"fc2_s_{key}", placeholder="e.g. 100123")
+            with _fc2:
+                _rules = ["All"] + sorted(tdf["rule"].dropna().unique().tolist()) if "rule" in tdf.columns else ["All"]
+                _rf = st.selectbox("Rule", _rules, key=f"fc2_rf_{key}")
+            if _s:
+                tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
+            if _rf != "All" and "rule" in tdf.columns:
+                tdf = tdf[tdf["rule"] == _rf]
+            sort_c = [c for c in ["avg_daily_orders","excess_qty"] if c in tdf.columns]
+            if sort_c:
+                tdf = tdf.sort_values(sort_c, ascending=[False,False], na_position="last")
+            tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
+            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
+            st.caption(f"{len(tdf):,} rows · {n_skus} SKUs")
+            st.dataframe(tdf, use_container_width=True, height=500)
+            st.download_button(f"⬇ {key} CSV", tdf.to_csv(index=False).encode(),
+                               file_name=f"fc_to_sfc_{key.lower()}.csv", mime="text/csv",
+                               key=f"dl_fc2_{key}")
 
-    with fc2sfc_mid_tab:
-        st.markdown("#### MIDDLE FC→SFC — Evict List")
-        st.caption("SKUs with FC D2S > 30. Sorted by excess_vol DESC.")
-        if df_mid_trigger.empty:
-            st.info("No MIDDLE FC→SFC tasks at current thresholds.")
-        else:
-            # Build location-level details using lot data
-            mid_skus = df_mid_trigger["item_number"].tolist()
-            df_fc_lots, lot_err = load_fc_lot_data(mid_skus)
-
-            if lot_err:
-                st.warning(f"FC lot data unavailable: {lot_err}. Showing SKU-level summary.")
-                df_mid_trigger.get("item_number")
-                _show_cols = [c for c in ["item_number", "excess_qty", "keep_qty",
-                                          "excess_vol", "avg_daily_orders", "fc_d2s"]
-                              if c in df_mid_trigger.columns]
-                st.dataframe(df_mid_trigger[_show_cols], use_container_width=True)
-            else:
-                loc_rows = []
-                for _, sku_row in df_mid_trigger.iterrows():
-                    locs = select_middle_fc_locations(df_fc_lots, sku_row)
-                    if not locs.empty:
-                        loc_rows.append(locs)
-
-                if loc_rows:
-                    df_mid_locs = pd.concat(loc_rows, ignore_index=True)
-                    _show = [c for c in ["item_number", "location_no", "loc_type",
-                                         "qty_to_transfer", "qty", "exp_date", "rule"]
-                             if c in df_mid_locs.columns]
-                    st.dataframe(df_mid_locs[_show], use_container_width=True)
-                    st.download_button(
-                        "⬇ Download MIDDLE Evict CSV",
-                        df_mid_locs[_show].to_csv(index=False).encode(),
-                        file_name="fc_to_sfc_middle_evict.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.info("No individual locations to transfer (all triggered SKUs have single-location FC stock).")
-
-    with fc2sfc_tail_tab:
-        st.markdown("#### TAIL FC→SFC — Clear List")
-        st.caption("All TAIL SKUs with FC stock. Full clear, sorted by fc_qty DESC.")
-        if df_tail_trigger.empty:
-            st.info("No TAIL FC→SFC tasks — no TAIL SKUs with FC stock.")
-        else:
-            tail_skus = df_tail_trigger["item_number"].tolist()
-            df_fc_lots_tail, lot_err_tail = load_fc_lot_data(tail_skus)
-
-            if lot_err_tail:
-                st.warning(f"FC lot data unavailable: {lot_err_tail}. Showing SKU-level summary.")
-                _show_cols = [c for c in ["item_number", "fc_qty", "avg_daily_orders"]
-                              if c in df_tail_trigger.columns]
-                st.dataframe(df_tail_trigger[_show_cols], use_container_width=True)
-            else:
-                tail_loc_rows = []
-                for sku in tail_skus:
-                    locs = select_tail_fc_locations(df_fc_lots_tail, sku)
-                    if not locs.empty:
-                        tail_loc_rows.append(locs)
-
-                if tail_loc_rows:
-                    df_tail_locs = pd.concat(tail_loc_rows, ignore_index=True)
-                    _show = [c for c in ["item_number", "location_no", "loc_type",
-                                         "qty_to_transfer", "qty", "exp_date", "rule"]
-                             if c in df_tail_locs.columns]
-                    st.dataframe(df_tail_locs[_show], use_container_width=True)
-                    st.download_button(
-                        "⬇ Download TAIL Clear CSV",
-                        df_tail_locs[_show].to_csv(index=False).encode(),
-                        file_name="fc_to_sfc_tail_clear.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.info("No individual locations found for TAIL SKUs.")
+    _render_fc2sfc(_fc2sfc_mid_tab,  _df_mid,  "middle_evict",
+                   "SKUs where FC has too much stock (D2S > 30). Transfer excess back to SFC, keep 30-day supply in FC.")
+    _render_fc2sfc(_fc2sfc_tail_tab, _df_tail, "tail_clear",
+                   "TAIL SKUs with FC stock. Full clear — move everything from FC to SFC.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

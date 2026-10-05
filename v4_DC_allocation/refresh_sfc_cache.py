@@ -327,7 +327,12 @@ except Exception as e:
 print(f"\n  [8] Building FC→SFC SKU-level task lists...")
 t0 = time.perf_counter()
 try:
-    from logic.fc_to_sfc import compute_fc_to_sfc as _compute_fc2sfc
+    from logic.fc_to_sfc import (
+        compute_fc_to_sfc as _compute_fc2sfc,
+        select_middle_fc_locations as _sel_mid,
+        select_tail_fc_locations as _sel_tail,
+    )
+    from data.loader import load_fc_lot_data as _load_fc_lots
     from config import P as _P2
 
     _cfg2 = dict(_P2)
@@ -337,33 +342,60 @@ try:
         _mid  = _df_triggered2[_df_triggered2["trigger"]=="MIDDLE_EVICT"].copy()
         _tail = _df_triggered2[_df_triggered2["trigger"]=="TAIL_CLEAR"].copy()
 
-        # Add list_id column and store as fc2sfc_tasks (SKU-level, no location detail)
-        # Use item_number as location_no placeholder — app will load lots on demand
-        def _sku_to_task(df_t, list_id):
-            if df_t.empty: return pd.DataFrame()
-            r = df_t.copy()
-            r["list_id"]         = list_id
-            r["location_no"]     = ""
-            r["loc_type"]        = ""
-            r["qty_to_transfer"] = r["excess_qty"]
-            r["qty"]             = r.get("fc_qty", r["excess_qty"])
-            r["exp_date"]        = ""
-            r["rule"]            = list_id
-            r["trigger_type"]    = list_id
-            r["keep_qty"]        = r.get("keep_qty", 0)
-            r["excess_vol"]      = r.get("excess_vol", 0)
-            r["fc_d2s"]          = r.get("fc_d2s", None)
-            r["avg_daily_orders"]= r.get("avg_daily_orders", 0)
-            return r
+        # Only query FC lots for TRIGGERED SKUs (not all 44K)
+        _fc_skus = list(set(_mid["item_number"].tolist() + _tail["item_number"].tolist()))
+        print(f"      Triggered: {len(_mid):,} MIDDLE, {len(_tail):,} TAIL → querying {len(_fc_skus):,} FC SKU lots...")
+
+        _df_fc_lots, _fc_err = _load_fc_lots(_fc_skus)
+        if _fc_err:
+            print(f"      FC lot query error: {_fc_err}")
+            _df_fc_lots = pd.DataFrame()
+        else:
+            print(f"      FC lots: {len(_df_fc_lots):,} rows")
+
+        # Build location-level rows for MIDDLE EVICT
+        _mid_rows = []
+        if not _df_fc_lots.empty:
+            for _, _sku_row in _mid.iterrows():
+                _locs = _sel_mid(_df_fc_lots, _sku_row)
+                if not _locs.empty:
+                    _locs["segment"]          = "MIDDLE"
+                    _locs["trigger_type"]     = "MIDDLE_EVICT"
+                    _locs["excess_qty"]       = float(_sku_row.get("excess_qty", 0) or 0)
+                    _locs["keep_qty"]         = float(_sku_row.get("keep_qty", 0) or 0)
+                    _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
+                    _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
+                    _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
+                    _mid_rows.append(_locs)
+
+        # Build location-level rows for TAIL CLEAR
+        _tail_rows = []
+        if not _df_fc_lots.empty:
+            for _, _sku_row in _tail.iterrows():
+                _sku = str(_sku_row["item_number"])
+                _locs = _sel_tail(_df_fc_lots, _sku)
+                if not _locs.empty:
+                    _locs["segment"]          = "TAIL"
+                    _locs["trigger_type"]     = "TAIL_CLEAR"
+                    _locs["excess_qty"]       = float(_sku_row.get("fc_qty", 0) or 0)
+                    _locs["keep_qty"]         = 0.0
+                    _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
+                    _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
+                    _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
+                    _tail_rows.append(_locs)
+
+        _df_mid_locs  = pd.concat(_mid_rows,  ignore_index=True) if _mid_rows  else pd.DataFrame()
+        _df_tail_locs = pd.concat(_tail_rows, ignore_index=True) if _tail_rows else pd.DataFrame()
 
         db.write_fc2sfc_tasks({
-            "MIDDLE_EVICT": _sku_to_task(_mid,  "MIDDLE_EVICT"),
-            "TAIL_CLEAR":   _sku_to_task(_tail, "TAIL_CLEAR"),
+            "MIDDLE_EVICT": _df_mid_locs,
+            "TAIL_CLEAR":   _df_tail_locs,
         })
         elapsed = time.perf_counter() - t0
-        print(f"      MIDDLE_EVICT: {len(_mid):,} SKUs")
-        print(f"      TAIL_CLEAR:   {len(_tail):,} SKUs  ({elapsed:.1f}s)")
-        log.append(f"fc2sfc: MIDDLE={len(_mid):,} TAIL={len(_tail):,} in {elapsed:.1f}s")
+        print(f"      MIDDLE_EVICT: {len(_df_mid_locs):,} rows  ({len(_mid):,} SKUs)")
+        print(f"      TAIL_CLEAR:   {len(_df_tail_locs):,} rows  ({len(_tail):,} SKUs)")
+        print(f"      Done in {elapsed:.1f}s")
+        log.append(f"fc2sfc: MIDDLE={len(_df_mid_locs):,} TAIL={len(_df_tail_locs):,} in {elapsed:.1f}s")
     else:
         print("      No FC→SFC triggers")
         log.append("fc2sfc: no triggers")

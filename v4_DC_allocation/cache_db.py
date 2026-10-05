@@ -70,6 +70,36 @@ CREATE TABLE IF NOT EXISTS exp_flags (
     item_number TEXT PRIMARY KEY
 );
 
+CREATE TABLE IF NOT EXISTS fc_lots (
+    item_number      TEXT NOT NULL,
+    location_no      TEXT NOT NULL,
+    loc_type         TEXT,
+    qty              REAL,
+    exp_date         TEXT,
+    inv_age_days     INTEGER,
+    case_qty         INTEGER,
+    need_minimal_exp INTEGER,
+    PRIMARY KEY (item_number, location_no)
+);
+
+CREATE TABLE IF NOT EXISTS fc2sfc_tasks (
+    list_id          TEXT NOT NULL,
+    item_number      TEXT,
+    location_no      TEXT,
+    loc_type         TEXT,
+    qty_to_transfer  REAL,
+    qty              REAL,
+    exp_date         TEXT,
+    rule             TEXT,
+    trigger_type     TEXT,
+    excess_qty       REAL,
+    keep_qty         REAL,
+    fc_d2s           REAL,
+    avg_daily_orders REAL,
+    excess_vol       REAL
+);
+CREATE INDEX IF NOT EXISTS idx_fc2sfc_list_id ON fc2sfc_tasks(list_id);
+
 CREATE TABLE IF NOT EXISTS task_list (
     list_id          TEXT NOT NULL,
     item_number      TEXT,
@@ -168,6 +198,98 @@ class CacheDB:
         for c in cols:
             if c != "item_number":
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        return df
+
+    # ── FC lots ───────────────────────────────────────────────────────────────
+
+    def write_fc_lots(self, df: pd.DataFrame):
+        if df is None or df.empty:
+            return
+        df = df.copy()
+        if "exp_date" in df.columns:
+            df["exp_date"] = df["exp_date"].astype(str).replace("NaT", "")
+        rows = df[["item_number","location_no","loc_type","qty",
+                   "exp_date","inv_age_days","case_qty","need_minimal_exp"]].values.tolist()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM fc_lots")
+            conn.executemany(
+                "INSERT OR REPLACE INTO fc_lots VALUES(?,?,?,?,?,?,?,?)", rows
+            )
+            self._touch(conn, "fc_lots")
+
+    def read_fc_lots(self, skus: list[str] | None = None) -> pd.DataFrame:
+        with self._conn() as conn:
+            if skus:
+                ph = ",".join("?" * len(skus))
+                df = pd.read_sql(
+                    f"SELECT * FROM fc_lots WHERE item_number IN ({ph})",
+                    conn, params=skus
+                )
+            else:
+                df = pd.read_sql("SELECT * FROM fc_lots", conn)
+        if df.empty:
+            return df
+        df["qty"]              = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        df["exp_date"]         = pd.to_datetime(df["exp_date"].replace("", None), errors="coerce")
+        df["inv_age_days"]     = pd.to_numeric(df["inv_age_days"], errors="coerce").fillna(0).astype(int)
+        df["need_minimal_exp"] = pd.to_numeric(df["need_minimal_exp"], errors="coerce").fillna(0).astype(int)
+        df["case_qty"]         = pd.to_numeric(df["case_qty"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+        return df
+
+    # ── FC→SFC tasks ──────────────────────────────────────────────────────────
+
+    _FC2SFC_COLS = [
+        "list_id","item_number","location_no","loc_type","qty_to_transfer","qty",
+        "exp_date","rule","trigger_type","excess_qty","keep_qty",
+        "fc_d2s","avg_daily_orders","excess_vol",
+    ]
+
+    def write_fc2sfc_tasks(self, task_lists: dict):
+        """Write MIDDLE_EVICT / TAIL_CLEAR DataFrames to fc2sfc_tasks table."""
+        rows = []
+        list_ids = []
+        for list_id, df in task_lists.items():
+            list_ids.append(list_id)
+            if df is None or df.empty:
+                continue
+            df = df.copy()
+            df["list_id"] = list_id
+            if "exp_date" in df.columns:
+                df["exp_date"] = df["exp_date"].astype(str).replace("NaT", "")
+            for col in self._FC2SFC_COLS:
+                if col not in df.columns:
+                    df[col] = None
+            rows.append(df[self._FC2SFC_COLS])
+        with self._conn() as conn:
+            ph = ",".join("?" * len(list_ids))
+            conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
+            if rows:
+                pd.concat(rows, ignore_index=True).to_sql(
+                    "fc2sfc_tasks", conn, if_exists="append", index=False
+                )
+            self._touch(conn, "fc2sfc_tasks")
+
+    def read_fc2sfc_task(self, list_id: str) -> pd.DataFrame:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT item_number,location_no,loc_type,qty_to_transfer,qty,"
+                "exp_date,rule,trigger_type,excess_qty,keep_qty,"
+                "fc_d2s,avg_daily_orders,excess_vol "
+                "FROM fc2sfc_tasks WHERE list_id=?", (list_id,)
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        df["qty_to_transfer"]  = pd.to_numeric(df["qty_to_transfer"], errors="coerce").fillna(0)
+        df["qty"]              = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        df["exp_date"]         = pd.to_datetime(df["exp_date"].replace("", None), errors="coerce")
+        df["fc_d2s"]           = pd.to_numeric(df["fc_d2s"], errors="coerce")
+        df["avg_daily_orders"] = pd.to_numeric(df["avg_daily_orders"], errors="coerce").fillna(0)
+        df["excess_qty"]       = pd.to_numeric(df["excess_qty"], errors="coerce").fillna(0)
+        df["keep_qty"]         = pd.to_numeric(df["keep_qty"], errors="coerce").fillna(0)
+        df["excess_vol"]       = pd.to_numeric(df["excess_vol"], errors="coerce").fillna(0)
         return df
 
     # ── SFC lots ──────────────────────────────────────────────────────────────
