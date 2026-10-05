@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Inbound 收货决策树</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', 'PingFang SC', sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #fff;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    font-size: .85rem;
+    color: #666;
+    margin-bottom: 28px;
+  }
+
+  /* ── Tab nav ── */
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #2a2a2a;
+    padding-bottom: 0;
+  }
+  .tab-btn {
+    padding: 8px 20px;
+    border: none;
+    background: transparent;
+    color: #888;
+    font-size: .85rem;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: all .2s;
+  }
+  .tab-btn.active {
+    color: #7c9eff;
+    border-bottom-color: #7c9eff;
+    font-weight: 600;
+  }
+  .tab-btn:hover { color: #ccc; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ── Diagram card ── */
+  .card {
+    background: #161b27;
+    border-radius: 12px;
+    padding: 28px;
+    border: 1px solid #1e2535;
+    margin-bottom: 20px;
+    overflow-x: auto;
+  }
+  .card-title {
+    font-size: .9rem;
+    font-weight: 600;
+    color: #7c9eff;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge {
+    font-size: .7rem;
+    padding: 2px 8px;
+    border-radius: 99px;
+    font-weight: 500;
+  }
+  .badge-blue   { background: #1e3a5f; color: #7cb9ff; }
+  .badge-green  { background: #1a3a2a; color: #5fd98a; }
+  .badge-orange { background: #3a2a10; color: #ffb347; }
+  .badge-red    { background: #3a1a1a; color: #ff7c7c; }
+
+  /* ── Legend ── */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .78rem;
+    color: #999;
+  }
+  .legend-dot {
+    width: 10px; height: 10px;
+    border-radius: 2px;
+  }
+
+  /* ── Table ── */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+  }
+  th {
+    background: #1e2535;
+    color: #7c9eff;
+    padding: 10px 14px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 1px solid #2a3550;
+  }
+  td {
+    padding: 9px 14px;
+    border-bottom: 1px solid #1e2535;
+    color: #ccc;
+    vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #1a2030; }
+  .tag-fc    { color: #7cb9ff; font-weight: 600; }
+  .tag-dc    { color: #5fd98a; font-weight: 600; }
+  .tag-warn  { color: #ffb347; font-weight: 600; }
+  .tag-alert { color: #ff7c7c; font-weight: 600; }
+
+  /* ── mermaid override ── */
+  .mermaid svg { max-width: 100%; }
+</style>
+</head>
+<body>
+
+<h1>📦 Inbound 收货决策树</h1>
+<div class="subtitle">配合 NJ FC Segment Planning · 两层决策：第一层 FC vs DC · 第二层 Bin vs Stock</div>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('overview')">总览</button>
+  <button class="tab-btn" onclick="switchTab('layer1')">第一层：FC vs DC</button>
+  <button class="tab-btn" onclick="switchTab('layer2')">第二层：Bin vs Stock</button>
+  <button class="tab-btn" onclick="switchTab('exp')">保质期覆盖规则</button>
+  <button class="tab-btn" onclick="switchTab('output')">决策输出</button>
+</div>
+
+<!-- ════════════════ TAB: 总览 ════════════════ -->
+<div class="tab-panel active" id="tab-overview">
+  <div class="card">
+    <div class="card-title">🗺 完整决策流（两层）</div>
+    <div class="mermaid">
+flowchart TD
+    START(["📦 收货 SKU\n(来货批次)"])
+
+    START --> L1{"第一层\nFC 还是 DC？"}
+
+    L1 -->|TAIL SKU| DC_TAIL["→ DC ✓\nTAIL 不持有 FC 库存"]
+    L1 -->|FC D2S > 驱逐线\nMIDDLE >30D| DC_FAT["→ DC ✓\nFC 已过饱，不加剧"]
+    L1 -->|FC D2S 正常区间\n28~30D| DC_NORM["→ DC ✓\n默认缓冲\n(除非保质期覆盖④)"]
+    L1 -->|FC D2S < 触发线\nTOP/MIDDLE <28D| EXP_CHK{"保质期\n覆盖规则\n① ② ③ 触发？"}
+
+    EXP_CHK -->|Yes| DC_EXP["→ DC ✓\n保质期覆盖，改去DC"]
+    EXP_CHK -->|No| GO_FC["→ FC ✓\n需要补 FC"]
+
+    DC_NORM --> EXP4{"保质期\n覆盖规则④\n新货是全场最旧？"}
+    EXP4 -->|Yes| GO_FC2["→ FC ✓\n旧货需快出\n触发FC现货移DC"]
+    EXP4 -->|No| DC_NORM
+
+    GO_FC --> L2A{"第二层\nFC：Bin 还是 Stock？"}
+    GO_FC2 --> L2A
+
+    DC_TAIL --> L2B{"第二层\nDC：Bin 还是 Stock？"}
+    DC_FAT --> L2B
+    DC_NORM --> L2B
+    DC_EXP --> L2B
+
+    L2A -->|FC Bin 有空位| FC_BIN_CHK{"FC 已有\nBin 库存？"}
+    L2A -->|FC Bin 满\nFC Stock 有空| FC_STOCK(["✅ FC Stock\n等 Bin 空再补入"])
+    L2A -->|FC 全满| FALLBACK(["⚠️ 退回 DC\n或等 FC 清出空间"])
+
+    FC_BIN_CHK -->|无库存\n开新位| FC_BIN_NEW(["✅ FC Bin\n开新位"])
+    FC_BIN_CHK -->|有库存\n新货 exp ≥ 现有| FC_BIN_OK(["✅ FC Bin\nFEFO 正常叠加"])
+    FC_BIN_CHK -->|有库存\n新货 exp < 现有| FC_BIN_OLD(["✅ FC Bin\n旧货入前\n触发批次重排"])
+
+    L2B -->|DC Bin 有空位| DC_BIN_CHK{"DC 已有\nBin 库存？"}
+    L2B -->|DC Bin 满\nDC Stock 有空| DC_STOCK(["✅ DC Stock\n等 DC Bin 空再补入"])
+    L2B -->|DC 全满| DC_FULL(["🚨 容量告警\n上报"])
+
+    DC_BIN_CHK -->|无库存\n开新位| DC_BIN_NEW(["✅ DC Bin\n开新位"])
+    DC_BIN_CHK -->|有库存\n新货 exp ≥ 现有| DC_BIN_OK(["✅ DC Bin\nFEFO 正常叠加"])
+    DC_BIN_CHK -->|有库存\n新货 exp < 现有| DC_BIN_OLD(["✅ DC Bin\n旧货入前\n触发批次重排"])
+
+    style DC_TAIL    fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_FAT     fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_NORM    fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_EXP     fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style GO_FC      fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style GO_FC2     fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style FC_BIN_NEW fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style FC_BIN_OK  fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style FC_BIN_OLD fill:#2a3a1f,stroke:#5a7a2f,color:#afd98a
+    style FC_STOCK   fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style FALLBACK   fill:#3a2a10,stroke:#7a5a20,color:#ffb347
+    style DC_BIN_NEW fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_BIN_OK  fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_BIN_OLD fill:#2a3a1f,stroke:#5a7a2f,color:#afd98a
+    style DC_STOCK   fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style DC_FULL    fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════ TAB: 第一层 ════════════════ -->
+<div class="tab-panel" id="tab-layer1">
+  <div class="card">
+    <div class="card-title">第一层：FC vs DC 分配决策 <span class="badge badge-blue">Segment × D2S</span></div>
+    <div class="mermaid">
+flowchart TD
+    IN(["来货 SKU"])
+
+    IN --> T1{"Segment?"}
+
+    T1 -->|TAIL| R_TAIL(["→ DC\nTAIL 不持有 FC 库存"])
+
+    T1 -->|MIDDLE\nor TOP| D2S{"FC D2S\n当前状态?"}
+
+    D2S -->|"> 驱逐线\nMIDDLE >30D"| R_FAT(["→ DC\nFC 过饱\nPlanning 正在清出 FC"])
+
+    D2S -->|"< 触发线\nTOP <28D\nMIDDLE <28D"| EXP_Q{"保质期覆盖\n规则 ① ② ③？"}
+
+    D2S -->|"正常区间\n28 ~ 30D"| EXP_Q4{"保质期覆盖\n规则 ④？\n新货是全场最旧？"}
+
+    EXP_Q -->|触发| R_EXP(["→ DC\n保质期优先\n见覆盖规则详情"])
+    EXP_Q -->|未触发| R_FC(["→ FC\nPlanning 需要补 FC"])
+
+    EXP_Q4 -->|触发| R_FC2(["→ FC\n旧货需在高周转区出\n触发 FC 现有货移 DC"])
+    EXP_Q4 -->|未触发| R_DC_NORM(["→ DC\n默认缓冲\nFC 库存暂时充足"])
+
+    style R_TAIL    fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style R_FAT     fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style R_EXP     fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style R_DC_NORM fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style R_FC      fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style R_FC2     fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════ TAB: 第二层 ════════════════ -->
+<div class="tab-panel" id="tab-layer2">
+
+  <div class="card">
+    <div class="card-title">线路 A：货到 FC — Bin vs Stock <span class="badge badge-blue">FC Put-away</span></div>
+    <div class="mermaid">
+flowchart TD
+    FC_IN(["货到 FC"])
+
+    FC_IN --> BIN_FREE{"FC Bin\n有空位？"}
+
+    BIN_FREE -->|Yes| HAS_INV{"FC 已有\nBin 在库？"}
+    BIN_FREE -->|No| STK_FREE{"FC Stock\n有空位？"}
+
+    HAS_INV -->|无在库| NEW_BIN(["✅ FC Bin\n开新位"])
+    HAS_INV -->|有在库\n新货 exp ≥ 现有 exp| NORM_BIN(["✅ FC Bin\nFEFO 正常\n新货叠在后面"])
+    HAS_INV -->|有在库\n新货 exp < 现有 exp| OLD_BIN(["✅ FC Bin\n旧货放前\n⚠️ 触发批次重排\nFC 现有较新批移 Stock"])
+
+    STK_FREE -->|Yes| FC_STK(["✅ FC Stock\n等 FC Bin 清出后\n内部补入 Bin"])
+    STK_FREE -->|No| FULL(["⚠️ FC 无空间\n退回 DC\n或等 FC→DC 清出"])
+
+    style NEW_BIN  fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style NORM_BIN fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style OLD_BIN  fill:#2a3a1f,stroke:#5a7a2f,color:#afd98a
+    style FC_STK   fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style FULL     fill:#3a2a10,stroke:#7a5a20,color:#ffb347
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">线路 B：货到 DC — Bin vs Stock <span class="badge badge-green">DC Put-away</span></div>
+    <div class="mermaid">
+flowchart TD
+    DC_IN(["货到 DC"])
+
+    DC_IN --> BIN_FREE{"DC Bin\n有空位？"}
+
+    BIN_FREE -->|Yes| HAS_INV{"DC 已有\nBin 在库？"}
+    BIN_FREE -->|No| STK_FREE{"DC Stock\n有空位？"}
+
+    HAS_INV -->|无在库| NEW_BIN(["✅ DC Bin\n开新位"])
+    HAS_INV -->|有在库\n新货 exp ≥ 现有 exp| NORM_BIN(["✅ DC Bin\nFEFO 正常\n新货叠在后面"])
+    HAS_INV -->|有在库\n新货 exp < 现有 exp| OLD_BIN(["✅ DC Bin\n旧货放前\n⚠️ 触发批次重排\nDC 现有较新批移 Stock"])
+
+    STK_FREE -->|Yes| DC_STK(["✅ DC Stock\n等 DC Bin 清出后\n内部补入 Bin"])
+    STK_FREE -->|No| FULL(["🚨 DC 全满\n上报容量告警"])
+
+    style NEW_BIN  fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style NORM_BIN fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style OLD_BIN  fill:#2a3a1f,stroke:#5a7a2f,color:#afd98a
+    style DC_STK   fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style FULL     fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    </div>
+  </div>
+
+</div>
+
+<!-- ════════════════ TAB: 保质期覆盖规则 ════════════════ -->
+<div class="tab-panel" id="tab-exp">
+  <div class="card">
+    <div class="card-title">保质期覆盖规则详情 <span class="badge badge-orange">可能改变第一层判断</span></div>
+    <div class="mermaid">
+flowchart LR
+    subgraph OVERRIDE_TO_DC["改为 → DC（原判断是 FC）"]
+        R1["规则 ①\n新货 exp < DC_bin_exp\n新货比 DC Bin 里最旧的还旧\n→ DC 先消化最旧批\n触发：DC 此 SKU 最高出库优先级"]
+        R2["规则 ②\n情形 3.1\nFC_Stock < DC < FC_Bin\nPlanning 要做 Date Switch\n→ 新货进 DC\nPlanning 触发 FC 内部倒仓"]
+        R3["规则 ③\n情形 3.5 / 3.6\nDC < FC_Stock 或 FC_Bin\nDC 最旧，DC 自己先消化\n→ 新货进 DC 补充后续库存"]
+    end
+
+    subgraph OVERRIDE_TO_FC["改为 → FC（原判断是 DC）"]
+        R4["规则 ④\n新货 exp < FC_bin_exp\n且 新货 exp < FC_stock_exp\n且 FC D2S 在正常区间\nFC 里货比新货新\n→ 新货进 FC Bin 快出\n触发：FC 现有货安排移 DC"]
+    end
+
+    style R1 fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style R2 fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style R3 fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style R4 fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">保质期情形 × 收货推荐 × Planning 联动</div>
+    <table>
+      <thead>
+        <tr>
+          <th>情形</th>
+          <th>日期排序</th>
+          <th>收货推荐</th>
+          <th>Planning 联动动作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1.1</td>
+          <td>FC Bin exp &gt; DC exp</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td>无额外动作，正常消化 DC 旧货</td>
+        </tr>
+        <tr>
+          <td>1.2</td>
+          <td>FC Bin exp &lt; DC exp</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td><span class="tag-warn">加速 FC Bin→DC</span>，标记 FC Bin SKU 优先清出</td>
+        </tr>
+        <tr>
+          <td>2.1</td>
+          <td>FC Stock exp &gt; DC exp</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td>暂缓 DC→FC 补货计划，等 DC 先清</td>
+        </tr>
+        <tr>
+          <td>2.2</td>
+          <td>FC Stock exp &lt; DC exp</td>
+          <td><span class="tag-fc">FC</span> 留 / FC Stock→DC Bin</td>
+          <td>维持 FC 存量，加速 FC Stock 出货</td>
+        </tr>
+        <tr>
+          <td>3.1</td>
+          <td>FC Stock &lt; DC &lt; FC Bin</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td><span class="tag-warn">触发 FC Date Switch</span>：Stock→Bin 内部倒仓，Bin→DC</td>
+        </tr>
+        <tr>
+          <td>3.2</td>
+          <td>FC Bin &lt; DC &lt; FC Stock</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td><span class="tag-warn">优先清 FC Bin</span>，加速 FC Bin→DC</td>
+        </tr>
+        <tr>
+          <td>3.3</td>
+          <td>FC Stock &lt; FC Bin &lt; DC</td>
+          <td><span class="tag-fc">FC</span></td>
+          <td>无额外动作，FC 整体比 DC 旧，FC 优先消化</td>
+        </tr>
+        <tr>
+          <td>3.4</td>
+          <td>FC Bin &lt; FC Stock &lt; DC</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td><span class="tag-warn">加速 FC→DC</span>，移出 FC 最旧批次</td>
+        </tr>
+        <tr>
+          <td>3.5</td>
+          <td>DC &lt; FC Stock &lt; FC Bin</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td>DC 最旧先消化，新货进 DC 补充后续库存</td>
+        </tr>
+        <tr>
+          <td>3.6</td>
+          <td>DC &lt; FC Bin &lt; FC Stock</td>
+          <td><span class="tag-dc">DC</span></td>
+          <td>同 3.5，DC 先出旧货，FC 不动</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════════════ TAB: 决策输出 ════════════════ -->
+<div class="tab-panel" id="tab-output">
+  <div class="card">
+    <div class="card-title">每批收货 SKU 产出字段</div>
+    <table>
+      <thead>
+        <tr><th>字段</th><th>值域</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>inbound_to</code></td><td>FC / DC</td><td>第一层决策结果</td></tr>
+        <tr><td><code>put_away_type</code></td><td>Bin / Stock</td><td>第二层决策结果</td></tr>
+        <tr><td><code>final_location</code></td><td>FC_Bin / FC_Stock / DC_Bin / DC_Stock</td><td>最终建议位置类型</td></tr>
+        <tr><td><code>fefo_flag</code></td><td>OK / RESEQUENCE_NEEDED</td><td>是否触发批次重排</td></tr>
+        <tr><td><code>planning_trigger</code></td><td>None / ACCELERATE_FC_OUT / DATE_SWITCH / DC_PRIORITY_OUT</td><td>是否需要联动 Planning</td></tr>
+        <tr><td><code>exp_case</code></td><td>1.1 ~ 3.6 / N/A</td><td>命中的保质期情形编号</td></tr>
+        <tr><td><code>reason</code></td><td>文字</td><td>D2S 状态 + 保质期情形说明</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title">⚠️ 两种需要反向触发 Planning 的场景</div>
+    <table>
+      <thead>
+        <tr><th>触发条件</th><th>Planning 动作</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>新货进了 FC Bin，但 <code>新货 exp &lt; FC 现有货 exp</code></td>
+          <td><span class="tag-warn">RESEQUENCE</span>：将 FC 现有较新批次移到 Stock 缓冲，确保 FC Bin 保持 FEFO</td>
+        </tr>
+        <tr>
+          <td>新货最旧（<code>新货 exp &lt; DC exp</code>）被推到 DC</td>
+          <td><span class="tag-alert">DC_PRIORITY_OUT</span>：将 DC 此 SKU 标为最高出库优先级，FIFO 最前处理</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#161b27',
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e0e0e0',
+      primaryBorderColor: '#2a6aaf',
+      lineColor: '#4a6a9f',
+      secondaryColor: '#1a3a2a',
+      tertiaryColor: '#2a2a2a',
+      edgeLabelBackground: '#1a1f2e',
+      clusterBkg: '#1a1f2e',
+      titleColor: '#e0e0e0',
+      nodeTextColor: '#e0e0e0',
+    },
+    flowchart: {
+      htmlLabels: true,
+      curve: 'basis',
+      padding: 20,
+    }
+  });
+
+  function switchTab(name) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>

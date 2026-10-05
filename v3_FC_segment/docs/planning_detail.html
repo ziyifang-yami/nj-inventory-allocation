@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Planning Tab — Detailed Flow</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #f0f2f5; margin: 0; padding: 32px; color: #222; }
+  h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 4px; }
+  .sub { color: #888; font-size: .9rem; margin-bottom: 36px; }
+  .section { background: #fff; border-radius: 14px; padding: 28px 32px;
+             margin-bottom: 28px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .sec-title { font-size: 1rem; font-weight: 700; color: #333;
+               border-left: 4px solid #5B8DEF; padding-left: 12px; margin-bottom: 20px; }
+  .mermaid { overflow-x: auto; }
+  .params { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin-top: 12px; }
+  .param { background: #f8f9ff; border: 1px solid #e0e4f7; border-radius: 8px; padding: 12px 16px; }
+  .param-name { font-size: .8rem; font-weight: 700; color: #3d52d5; margin-bottom: 4px; }
+  .param-desc { font-size: .8rem; color: #555; }
+  .param-val  { font-size: .75rem; color: #888; margin-top: 2px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; font-size: .8rem; }
+  .lg { display: flex; align-items: center; gap: 6px; }
+  .dot { width: 14px; height: 14px; border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<h1>📋 Planning Tab — Detailed Algorithm Flow</h1>
+<div class="sub">Tab 5 · NJ FC Segment Simulator · wh=002</div>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="lg"><div class="dot" style="background:#dbeafe"></div> Input / Parameter</div>
+  <div class="lg"><div class="dot" style="background:#fef3c7"></div> Decision / Condition</div>
+  <div class="lg"><div class="dot" style="background:#d1fae5"></div> Action / Process</div>
+  <div class="lg"><div class="dot" style="background:#fee2e2"></div> Output / Result</div>
+</div>
+
+<!-- Section 1: Inputs -->
+<div class="section">
+  <div class="sec-title">1 · Inputs & Pre-Processing</div>
+  <div class="mermaid">
+flowchart TD
+    A([Start]) --> B[df: segmented in-stock SKUs\naod_top, ol_top, ol_tail thresholds]
+    B --> C[/load_sku_loc_stats\nMySQL: wh_lot_inventory\n→ total_vol + loc_count per SKU/]
+    C --> D{Stats loaded\nsuccessfully?}
+    D -->|Yes| E[Merge stats into out_t1 TAIL\nand out_t2 MIDDLE evict]
+    D -->|No| F[Fallback: use transfer_vol\nfrom run_planning priority calc]
+    E --> G[Sort out_t1 TAIL\ntotal_vol DESC → loc_count DESC]
+    F --> G
+    G --> H[Sort out_t2 MIDDLE evict\ntotal_vol DESC]
+    H --> I[Sort in_t1 TOP DC→FC\nd2s ASC — lowest urgency first]
+    I --> J[Sort in_t2 MIDDLE DC→FC\nd2s×1e6 − vol×1e3 − adl]
+    J --> K[/load_capacity\nMySQL: fc_free_locs, fc_free_vol/]
+    K --> L[plan_params bundle\ncap_in, cap_out, plan_days\nd2s thresholds, fc capacity]
+    L --> M([Enter Day Loop])
+  </div>
+</div>
+
+<!-- Section 2: DC→FC -->
+<div class="section">
+  <div class="sec-title">2 · Step A — DC→FC (Demand Side, executed first each day)</div>
+  <div class="mermaid">
+flowchart TD
+    A([Day d starts]) --> B[effective_cap_in = cap_in\nfixed daily capacity]
+
+    B --> C{TOP pending?\nidx_in1 < n_in1}
+    C -->|Yes| D[Take next TOP SKU from in_t1\nsorted d2s ASC]
+    D --> E{pallet capacity\ncheck ok?}
+    E -->|Yes| F[Add TOP SKU to today's DC→FC batch\ns3 += 1, day_vol_in += vol]
+    E -->|No, pallet full| G[Skip SKU, advance j]
+    F --> H{s3 < cap_in?}
+    H -->|Yes, more capacity| C
+    H -->|No, cap reached| I
+
+    C -->|No, TOP done| I[Fill remaining cap with MIDDLE\nfrom in_t2, sorted by priority]
+    I --> J{MIDDLE pending?\nidx_in2 < n_in2}
+    J -->|Yes| K{s3 + s4 < cap_in?}
+    K -->|Yes| L[Take next MIDDLE SKU\nsorted: d2s×1e6 − vol×1e3 − adl]
+    L --> M{pallet capacity ok?}
+    M -->|Yes| N[Add MIDDLE to batch\ns4 += 1, day_vol_in += vol]
+    M -->|No| O[Skip, advance j]
+    N --> J
+    K -->|No, cap reached| P
+    J -->|No more MIDDLE| P
+
+    P([DC→FC batch finalized\ns3 TOP + s4 MIDDLE\nday_vol_in, day_locs_in])
+  </div>
+</div>
+
+<!-- Section 3: FC→DC -->
+<div class="section">
+  <div class="sec-title">3 · Step B — FC→DC (Supply Side, greedy balance)</div>
+  <div class="mermaid">
+flowchart TD
+    A([DC→FC batch known\nday_vol_in, day_locs_in]) --> B[need_vol = day_vol_in\nneed_locs = day_locs_in\nMust release at least this much]
+
+    B --> C{s1+s2 < cap_out?}
+    C -->|Yes, more capacity| D{cum_out < need_vol\nOR cum_locs < need_locs?\n= still need to balance}
+    D -->|Yes, balance needed| E{next_mid_vol ≥ next_tail_vol\nAND MIDDLE available?}
+    E -->|Yes, MIDDLE bigger| F[Take MIDDLE SKU from out_t2\n= greedy: bigger vol releases more space]
+    E -->|No, TAIL bigger or no MIDDLE| G[Take TAIL SKU from out_t1\n= always prefer TAIL]
+    D -->|No, balance satisfied| H{TAIL available?\ntail_ptr < n_out1}
+    H -->|Yes| I[Take TAIL SKU\nfill remaining cap with TAIL]
+    H -->|No, TAIL exhausted| J{MIDDLE available?\nmid_ptr < n_out2}
+    J -->|Yes| K[Take MIDDLE SKU\nfill with MIDDLE only]
+    J -->|No| L[Break — nothing left]
+    F --> M[cum_out += vol\ncum_locs += 1]
+    G --> M
+    I --> M
+    K --> M
+    M --> C
+    C -->|No, cap reached| N
+
+    N([FC→DC batch finalized\ns1 TAIL + s2 MIDDLE\nday_vol_out, day_locs_out])
+    N --> O[Re-sort today's FC→DC by vol DESC\nfor operational efficiency on floor]
+  </div>
+</div>
+
+<!-- Section 4: Cumulative tracking -->
+<div class="section">
+  <div class="sec-title">4 · Cumulative Tracking & Day Completion</div>
+  <div class="mermaid">
+flowchart TD
+    A([Today's batches finalized]) --> B[Update cumulative counters\ncum_vol_out += day_vol_out\ncum_locs_out += s_out\ncum_sku_in += s3 + s4\ncum_vol_in += day_vol_in]
+
+    B --> C[Record to df_sched\nitem_number, seg, action\ntransfer_qty, transfer_vol\nday, date, pallets]
+
+    C --> D{All 4 lists exhausted?\nidx_out1≥n_out1 AND idx_out2≥n_out2\nAND idx_in1≥n_in1 AND idx_in2≥n_in2}
+    D -->|Yes| E([Loop ends])
+    D -->|No| F{day < plan_days?}
+    F -->|Yes| G([Next day])
+    F -->|No, window exceeded| E
+
+    E --> H[Compute summary\npct_in, pct_out, vol_balance\nlocs_freed, locs_consumed\nswap_log per day]
+  </div>
+</div>
+
+<!-- Section 5: Output Display -->
+<div class="section">
+  <div class="sec-title">5 · Output Displays</div>
+  <div class="mermaid">
+flowchart LR
+    S([df_sched + smry]) --> K[KPI Cards\nDC→FC%, FC→DC%\nPallets/day\nRemaining by tier]
+    S --> RBT[Remaining by Tier table\nTAIL/MIDDLE/TOP/MIDDLE\nDirection, Total, Done, Remaining%]
+    S --> FCB[FC Location Balance panel\nInitial free + Released − Occupied\n= Net Free After Plan]
+    S --> DC[Daily Transfer charts\nSKU by tier+direction\nTotal SKUs/day\nVolume M in³/day]
+    S --> CUM[Cumulative charts\nSKU completion curves\nVol balance = cum_out − cum_in ≥ 0]
+    S --> GEN[🗂 Generate Location Plans button\n→ MySQL: actual lot/SFC locations\n→ Sort: day → area density → location_no\n→ FC→DC table + DC→FC table\n→ Download CSV per table]
+  </div>
+</div>
+
+<!-- Section 6: Parameters -->
+<div class="section">
+  <div class="sec-title">6 · All Parameters</div>
+  <div class="params">
+    <div class="param">
+      <div class="param-name">Workers FC→DC</div>
+      <div class="param-desc">Headcount dedicated to FC→DC transfers</div>
+      <div class="param-val">Default: 5 · Range: 1–20</div>
+    </div>
+    <div class="param">
+      <div class="param-name">SKU/person/day (FC→DC)</div>
+      <div class="param-desc">Productivity rate for picking/pulling from FC</div>
+      <div class="param-val">Default: 70 · Range: 40–120</div>
+    </div>
+    <div class="param">
+      <div class="param-name">Workers DC→FC</div>
+      <div class="param-desc">Headcount dedicated to DC→FC transfers</div>
+      <div class="param-val">Default: 5 · Range: 1–20</div>
+    </div>
+    <div class="param">
+      <div class="param-name">SKU/person/day (DC→FC)</div>
+      <div class="param-desc">Productivity rate for putaway into FC</div>
+      <div class="param-val">Default: 65 · Range: 40–120</div>
+    </div>
+    <div class="param">
+      <div class="param-name">Tasks/person/day</div>
+      <div class="param-desc">Physical task limit (pallet moves)</div>
+      <div class="param-val">Default: 100 · Range: 50–200</div>
+    </div>
+    <div class="param">
+      <div class="param-name">Pallets/task</div>
+      <div class="param-desc">Pallets handled per physical task</div>
+      <div class="param-val">Default: 2 · Range: 1–5</div>
+    </div>
+    <div class="param">
+      <div class="param-name">cap_out (derived)</div>
+      <div class="param-desc">min(workers_out × sku_rate, workers_out × tasks × pallets)</div>
+      <div class="param-val">FC→DC daily SKU cap — binding constraint</div>
+    </div>
+    <div class="param">
+      <div class="param-name">cap_in (derived)</div>
+      <div class="param-desc">min(workers_in × sku_rate, workers_in × tasks × pallets)</div>
+      <div class="param-val">DC→FC daily SKU cap — binding constraint</div>
+    </div>
+    <div class="param">
+      <div class="param-name">TOP trigger D2S</div>
+      <div class="param-desc">FC days-of-supply below this → urgent replenish from SFC</div>
+      <div class="param-val">Default: 28D · Range: 7–60</div>
+    </div>
+    <div class="param">
+      <div class="param-name">TOP target D2S</div>
+      <div class="param-desc">Target FC days-of-supply after TOP replenishment</div>
+      <div class="param-val">Default: 28D · Range: 7–60</div>
+    </div>
+    <div class="param">
+      <div class="param-name">MID routine D2S</div>
+      <div class="param-desc">MIDDLE DC→FC trigger: FC D2S at or below this</div>
+      <div class="param-val">Default: 28D · Range: 7–60</div>
+    </div>
+    <div class="param">
+      <div class="param-name">MID evict D2S</div>
+      <div class="param-desc">MIDDLE FC→DC trigger: too much in FC, D2S above this</div>
+      <div class="param-val">Default: 30D · Range: 14–90</div>
+    </div>
+    <div class="param">
+      <div class="param-name">MID target D2S</div>
+      <div class="param-desc">Target FC D2S for MIDDLE after replenishment</div>
+      <div class="param-val">Default: 28D · Range: 7–60</div>
+    </div>
+    <div class="param">
+      <div class="param-name">Min loc qty</div>
+      <div class="param-desc">Skip MIDDLE evict if excess quantity below this</div>
+      <div class="param-val">Default: 5 · Range: 1–20</div>
+    </div>
+    <div class="param">
+      <div class="param-name">Plan window (days)</div>
+      <div class="param-desc">How many days to simulate</div>
+      <div class="param-val">Default: 30 · Range: 7–90</div>
+    </div>
+    <div class="param">
+      <div class="param-name">fc_free_locs (auto)</div>
+      <div class="param-desc">Initial free FC locations from Capacity tab\n= total_locs − occupied_locs</div>
+      <div class="param-val">Real-time from MySQL load_capacity()</div>
+    </div>
+  </div>
+</div>
+
+<script>mermaid.initialize({startOnLoad:true, theme:'base',
+  themeVariables:{
+    primaryColor:'#dbeafe', primaryTextColor:'#1e3a8a',
+    primaryBorderColor:'#93c5fd',
+    lineColor:'#6b7280',
+    secondaryColor:'#d1fae5',
+    tertiaryColor:'#fef3c7',
+    noteBkgColor:'#f8f9ff'
+  }
+});</script>
+</body>
+</html>

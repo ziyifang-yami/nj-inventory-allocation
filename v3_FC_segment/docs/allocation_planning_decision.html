@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>Allocation Planning 决策图</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', 'PingFang SC', sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    padding: 24px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 1.4rem; font-weight: 700; color: #fff; margin-bottom: 4px; }
+  .subtitle { font-size: .85rem; color: #555; margin-bottom: 28px; }
+
+  .tabs {
+    display: flex; gap: 8px; margin-bottom: 20px;
+    border-bottom: 1px solid #1e2535; padding-bottom: 0;
+  }
+  .tab-btn {
+    padding: 8px 20px; border: none; background: transparent;
+    color: #666; font-size: .85rem; cursor: pointer;
+    border-bottom: 2px solid transparent; margin-bottom: -1px; transition: all .2s;
+  }
+  .tab-btn.active { color: #7c9eff; border-bottom-color: #7c9eff; font-weight: 600; }
+  .tab-btn:hover { color: #ccc; }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .card {
+    background: #161b27; border-radius: 12px; padding: 28px;
+    border: 1px solid #1e2535; margin-bottom: 20px; overflow-x: auto;
+  }
+  .card-title {
+    font-size: .9rem; font-weight: 600; color: #7c9eff;
+    margin-bottom: 20px; display: flex; align-items: center; gap: 8px;
+  }
+  .badge {
+    font-size: .7rem; padding: 2px 8px; border-radius: 99px; font-weight: 500;
+  }
+  .badge-blue   { background: #1e3a5f; color: #7cb9ff; }
+  .badge-amber  { background: #3a2a10; color: #ffb347; }
+  .badge-green  { background: #1a3a2a; color: #5fd98a; }
+  .badge-red    { background: #3a1a1a; color: #ff7c7c; }
+  .badge-purple { background: #2a1a4a; color: #cc99ff; }
+
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  th {
+    background: #1e2535; color: #7c9eff; padding: 10px 14px;
+    text-align: left; font-weight: 600; border-bottom: 1px solid #2a3550;
+  }
+  td {
+    padding: 9px 14px; border-bottom: 1px solid #1e2535;
+    color: #ccc; vertical-align: top;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #1a2030; }
+  code { background: #1e2535; padding: 1px 6px; border-radius: 4px; font-size: .8rem; color: #afd98a; }
+  .tag-dc    { color: #5fd98a; font-weight: 600; }
+  .tag-fc    { color: #7cb9ff; font-weight: 600; }
+  .tag-keep  { color: #aaa; font-weight: 600; }
+  .tag-warn  { color: #ffb347; font-weight: 600; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+  .param-block {
+    background: #1a1f2e; border-radius: 8px; padding: 16px 18px;
+    border: 1px solid #2a3550;
+  }
+  .param-block h3 { font-size: .82rem; color: #7c9eff; font-weight: 600; margin-bottom: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .param-row { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid #1e2535; font-size: .82rem; }
+  .param-row:last-child { border-bottom: none; }
+  .param-key { color: #888; }
+  .param-val { color: #e0e0e0; font-weight: 600; font-family: monospace; }
+</style>
+</head>
+<body>
+
+<h1>📋 Allocation Planning 决策图</h1>
+<div class="subtitle">NJ FC Segment v3 · SKU 分层 → 转移决策 → 日执行调度 · 基于 app.py 逻辑</div>
+
+<div class="tabs">
+  <button class="tab-btn active" onclick="switchTab('overview')">总览</button>
+  <button class="tab-btn" onclick="switchTab('segment')">SKU 分层</button>
+  <button class="tab-btn" onclick="switchTab('sku_decision')">SKU 转移决策</button>
+  <button class="tab-btn" onclick="switchTab('daily')">日执行调度</button>
+  <button class="tab-btn" onclick="switchTab('location')">位置计划生成</button>
+  <button class="tab-btn" onclick="switchTab('params')">参数参考</button>
+</div>
+
+<!-- ════════ TAB: 总览 ════════ -->
+<div class="tab-panel active" id="tab-overview">
+  <div class="card">
+    <div class="card-title">🗺 Planning 全流程总览</div>
+    <div class="mermaid">
+flowchart TD
+    SRC["📊 数据源\nMySQL 实时库存\nAthena 30D 销售/AOD\n容量数据 FC free_locs / vol"]
+
+    SRC --> SEG["Step 1\n📦 SKU 分层\nAOD × OrderLines → TOP / MIDDLE / TAIL"]
+
+    SEG --> IDEAL["Step 2\n⚖️ 理想态计算 calc_ideal()\n每个 SKU 打上 action + transfer_qty\n不受每日产能限制"]
+
+    IDEAL --> PLAN["Step 3\n📋 日执行调度 run_planning()\n在产能约束下\n分配到具体哪天执行\n保证 vol_out ≥ vol_in\nlocs_out ≥ locs_in"]
+
+    PLAN --> LOC["Step 4\n🗂 位置计划生成\n按 exp_date + area + location_no 排序\n输出具体 location 级别操作清单"]
+
+    subgraph ACTIONS["Transfer Actions"]
+        A1["DC→FC\nTOP 补货\nMIDDLE 补货"]
+        A2["FC→DC\nTAIL 全清\nMIDDLE 驱逐 excess"]
+    end
+
+    IDEAL --> ACTIONS
+    ACTIONS --> PLAN
+
+    style SRC   fill:#1e2535,stroke:#2a3550,color:#aaa
+    style SEG   fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style IDEAL fill:#2a3a10,stroke:#5a7a20,color:#afd98a
+    style PLAN  fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style LOC   fill:#2a1a4a,stroke:#5a3a9a,color:#cc99ff
+    style A1    fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style A2    fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    </div>
+  </div>
+</div>
+
+<!-- ════════ TAB: SKU 分层 ════════ -->
+<div class="tab-panel" id="tab-segment">
+  <div class="card">
+    <div class="card-title">📦 SKU 分层逻辑 <span class="badge badge-blue">Sidebar 参数驱动，实时重算</span></div>
+    <div class="mermaid">
+flowchart TD
+    IN(["SKU\n(有 FC 或 SFC 库存)"])
+
+    IN --> C1{"AOD ≥ aod_top\n且\nOL30 ≥ ol_top?"}
+    C1 -->|Yes| TOP(["🔵 TOP\nFC Primary\n目标：FC 持有 top_target 天库存\n触发补货阈值：fc_d2s < top_trigger"])
+    C1 -->|No| C2{"OL30 < ol_tail?"}
+    C2 -->|Yes| TAIL(["⚫ TAIL\nDC Primary\n目标：FC 全清\n所有 FC 库存移往 DC"])
+    C2 -->|No| MIDDLE(["🟡 MIDDLE\nDual WH\n目标：FC 持有 mid_target 天库存\n上下各有驱逐/补货触发线"])
+
+    subgraph defaults["默认阈值参数"]
+        P1["aod_top = 21 天\nol_top = 30 单\nol_tail = 8 单"]
+    end
+
+    style TOP    fill:#1e3a5f,stroke:#2a6aaf,color:#7cb9ff
+    style MIDDLE fill:#3a2a10,stroke:#7a5a20,color:#ffb347
+    style TAIL   fill:#2a2a2a,stroke:#4a4a4a,color:#aaa
+    style defaults fill:#1a1f2e,stroke:#2a3550,color:#888
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">分层阈值说明</div>
+    <table>
+      <thead><tr><th>Segment</th><th>触发条件</th><th>FC 策略</th><th>DC 策略</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="tag-fc">TOP</span></td>
+          <td>AOD ≥ 21 天 <b>且</b> 30D 单量 ≥ 30</td>
+          <td>FC Primary，保持 28D 库存</td>
+          <td>DC 作为补充缓冲</td>
+        </tr>
+        <tr>
+          <td><span class="tag-warn">MIDDLE</span></td>
+          <td>30D 单量在 8~30 之间</td>
+          <td>FC + DC 双仓，FC 保持 28D 区间</td>
+          <td>DC 兜底，FC 过饱时移回 DC</td>
+        </tr>
+        <tr>
+          <td><span class="tag-keep">TAIL</span></td>
+          <td>30D 单量 &lt; 8</td>
+          <td>FC 清空</td>
+          <td>DC Only</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════ TAB: SKU 转移决策 ════════ -->
+<div class="tab-panel" id="tab-sku_decision">
+
+  <div class="card">
+    <div class="card-title">⚖️ 每个 SKU 的 action 决策树 <span class="badge badge-amber">calc_ideal() / run_planning()</span></div>
+    <div class="mermaid">
+flowchart TD
+    SKU(["SKU"])
+
+    SKU --> ST{"Segment?"}
+
+    ST -->|TOP| TOP_CHK{"FC D2S\n< top_trigger\n(默认 28D)?"}
+    TOP_CHK -->|Yes 且 SFC > 0| TOP_IN["✅ DC→FC\ntransfer = min(needed, sfc)\nneeded = top_target×adl - fc\n优先级：D2S 最低（最紧迫）先"]
+    TOP_CHK -->|No| TOP_KEEP["KEEP\nFC 库存充足，不动"]
+
+    ST -->|MIDDLE| MID_CHK{"FC D2S?"}
+    MID_CHK -->|"≤ mid_routine\n(28D)\n且 SFC > 0"| MID_IN["✅ DC→FC\ntransfer = min(needed, sfc)\nneeded = mid_target×adl - fc\n优先级: D2S低×P1 体积大×P2 日销高×P3"]
+    MID_CHK -->|"> mid_evict\n(30D)\n且 excess > min_loc_qty"| MID_OUT["✅ FC→DC\ntransfer = fc - keep_qty\nkeep = mid_evict×adl\n优先级: excess体积大 × excess数量多"]
+    MID_CHK -->|"28D ~ 30D\n正常区间"| MID_KEEP["KEEP\n不动，FC 库存在合理范围"]
+
+    ST -->|TAIL| TAIL_CHK{"FC > 0?"}
+    TAIL_CHK -->|Yes| TAIL_OUT["✅ FC→DC\n全清\ntransfer = fc_qty\n优先级: 体积大优先"]
+    TAIL_CHK -->|No| TAIL_KEEP["KEEP\nFC 已清，无需操作"]
+
+    style TOP_IN   fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style MID_IN   fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style TAIL_OUT fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style MID_OUT  fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style TOP_KEEP fill:#1e2535,stroke:#2a3550,color:#666
+    style MID_KEEP fill:#1e2535,stroke:#2a3550,color:#666
+    style TAIL_KEEP fill:#1e2535,stroke:#2a3550,color:#666
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">优先级打分规则</div>
+    <table>
+      <thead><tr><th>动作</th><th>Tier</th><th>Priority 区间</th><th>排序逻辑（数字越小越先处理）</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><span class="tag-fc">DC→FC</span></td>
+          <td>TOP</td>
+          <td><code>1000 ~ 1999</code></td>
+          <td>FC D2S 最低优先（最紧迫补货）</td>
+        </tr>
+        <tr>
+          <td><span class="tag-fc">DC→FC</span></td>
+          <td>MIDDLE</td>
+          <td><code>2000 ~ 2999</code></td>
+          <td>P1 D2S 低（×600）+ P2 批量体积大（×300）+ P3 日销高（×99）</td>
+        </tr>
+        <tr>
+          <td><span class="tag-dc">FC→DC</span></td>
+          <td>TAIL</td>
+          <td><code>1000 ~ 1999</code></td>
+          <td>体积最大优先（先清大单元，减少 locs 压力）</td>
+        </tr>
+        <tr>
+          <td><span class="tag-dc">FC→DC</span></td>
+          <td>MIDDLE</td>
+          <td><code>2000 ~ 2999</code></td>
+          <td>P1 excess 体积大（×700）+ P2 excess 数量多（×299）</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════ TAB: 日执行调度 ════════ -->
+<div class="tab-panel" id="tab-daily">
+  <div class="card">
+    <div class="card-title">📋 日执行调度逻辑 <span class="badge badge-amber">run_planning() Daily Loop</span></div>
+    <div class="mermaid">
+flowchart TD
+    START(["Day 1 → plan_days\n每天循环"])
+
+    START --> STEP_A["Step A: DC→FC 先执行\n消耗 cap_in 上限\nTOP 先填满 → MIDDLE 填剩余\n记录 day_vol_in, day_locs_in"]
+
+    STEP_A --> STEP_B["Step B: FC→DC 后执行\n目标: vol_out ≥ vol_in\n且 locs_out ≥ locs_in\nTAIL + MIDDLE 合并排序\n按 tier_rank + 体积 desc 贪心选取"]
+
+    STEP_B --> BAL{"vol_out ≥ vol_in\n且 locs_out ≥ locs_in?"}
+
+    BAL -->|已满足平衡| EXTRA["继续用剩余 cap_out\n按 TAIL→MIDDLE 顺序额外清出"]
+
+    BAL -->|未满足| GREEDY["贪心继续选取\n优先选 MIDDLE（如果 mid_vol > tail_vol）\n否则选 TAIL\n直到满足平衡或 cap_out 耗尽"]
+
+    GREEDY --> EXTRA
+    EXTRA --> REC["记录当天批次\nFC→DC sorted by vol desc\nDC→FC as-is"]
+
+    REC --> CHK{"所有 SKU\n都已调度完？"}
+    CHK -->|No| START
+    CHK -->|Yes| DONE["输出 df_sched\nSKU × Day × Action × Vol × Pallets"]
+
+    subgraph BALANCE_RULE["平衡约束说明"]
+        B1["每天 FC 空出的空间\n必须 ≥ DC 补入的空间\n(vol_out ≥ vol_in)\n(locs_out ≥ locs_in)\n保证 FC 容量不超限"]
+    end
+
+    style STEP_A  fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style STEP_B  fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style GREEDY  fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style EXTRA   fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style DONE    fill:#2a1a4a,stroke:#5a3a9a,color:#cc99ff
+    style BALANCE_RULE fill:#1a1f2e,stroke:#2a3550,color:#888
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">日调度内部 — FC→DC 贪心选取逻辑</div>
+    <div class="mermaid">
+flowchart TD
+    POOL["FC→DC 候选池\nTAIL（tier_rank=0）\n+ MIDDLE evict（tier_rank=1）\n合并后 vol desc 排序"]
+
+    POOL --> NEED{"still_need?\ncum_out < need_vol\nor cum_lout < need_locs"}
+
+    NEED -->|Yes| COMPARE{"next_mid_vol\n≥ next_tail_vol?"}
+    COMPARE -->|Yes 且 MIDDLE 有剩| PICK_MID["选 MIDDLE\n贡献更大体积\n更快满足平衡"]
+    COMPARE -->|No 或 TAIL 有剩| PICK_TAIL["选 TAIL\nTAIL 优先级本来就更高"]
+
+    NEED -->|No（已满足平衡）| EXTRA_CAP{"还有剩余\ncap_out?"}
+    EXTRA_CAP -->|Yes| FILL["按 TAIL→MIDDLE 顺序\n继续选，直到 cap_out 耗尽"]
+    EXTRA_CAP -->|No| STOP["当天结束"]
+
+    PICK_MID  --> ACCUMULATE["cum_out += vol\ncum_lout += 1"]
+    PICK_TAIL --> ACCUMULATE
+    ACCUMULATE --> NEED
+
+    style PICK_MID  fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style PICK_TAIL fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style FILL      fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style STOP      fill:#1e2535,stroke:#2a3550,color:#666
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">产能参数与 Pallet 换算</div>
+    <table>
+      <thead><tr><th>参数</th><th>含义</th><th>备注</th></tr></thead>
+      <tbody>
+        <tr><td><code>cap_in</code></td><td>每日 DC→FC 最大 SKU 数</td><td>Workers × Prod 换算</td></tr>
+        <tr><td><code>cap_out</code></td><td>每日 FC→DC 最大 SKU 数</td><td>同上</td></tr>
+        <tr><td><code>pallet_cap_in</code></td><td>每日 DC→FC 最大 Pallet 数</td><td>额外体积上限</td></tr>
+        <tr><td><code>pallet_cap_out</code></td><td>每日 FC→DC 最大 Pallet 数</td><td>额外体积上限</td></tr>
+        <tr><td><code>PALLET_VOL</code></td><td>48×40×72×0.8 = 110,592 in³</td><td>6ft pallet 可用体积</td></tr>
+        <tr><td><code>plan_days</code></td><td>计划总天数</td><td>决定调度窗口长度</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════ TAB: 位置计划生成 ════════ -->
+<div class="tab-panel" id="tab-location">
+  <div class="card">
+    <div class="card-title">🗂 位置计划生成逻辑 <span class="badge badge-purple">select_*_locations()</span></div>
+    <div class="mermaid">
+flowchart TD
+    INPUT["df_sched 中已调度的 SKU\n+ 当日批次"]
+
+    INPUT --> TYPE{"Transfer\n方向?"}
+
+    TYPE -->|"DC→FC (TOP)"| TOP_LOC["select_top_locations()\n从 SFC 位置挑最小 lots\n升序 qty 选，直到 fc + cum ≥ 28D 目标\n整 location 转移"]
+
+    TYPE -->|"FC→DC (TAIL)"| TAIL_LOC["select_tail_locations()\nFC 全部 location 全清\n按 location_no 顺序排列"]
+
+    TYPE -->|"FC→DC (MIDDLE evict)"| MID_LOC{"has_exp\n(need_minimal_exp=1)?"}
+
+    MID_LOC -->|Yes + 多 location| R3["Rule 3: Exp + Multi\nexp_date DESC 排序\n最远日期先移出\nFC 保留最近日期（FEFO）"]
+    MID_LOC -->|Yes + 单 location| R4["Rule 4: Exp + Single\n只转 excess qty\nkeep = adl × 30D"]
+    MID_LOC -->|No + 多 location| R1["Rule 1: No-Exp + Multi\n找最接近 excess qty 的 location\n若误差 ≤ 15%: 整 location 转\n否则: 从小到大累积到 excess"]
+    MID_LOC -->|No + 单 location| R2["Rule 2: No-Exp + Single\n只转 excess qty\nkeep = adl × 30D\n若 transfer < min_threshold: 不转"]
+
+    TOP_LOC --> SORT["最终排序\nlocation_no 顺序\n（按区域顺序操作，减少行走）"]
+    TAIL_LOC --> SORT
+    R1 --> SORT
+    R2 --> SORT
+    R3 --> SORT
+    R4 --> SORT
+
+    SORT --> OUT["输出 location-level 操作清单\nitem_number × location_no × qty_to_transfer\nexp_date × rule × loc_type"]
+
+    style R3   fill:#2a3a10,stroke:#5a7a20,color:#afd98a
+    style R4   fill:#2a3a10,stroke:#5a7a20,color:#afd98a
+    style R1   fill:#1e2535,stroke:#2a3550,color:#ccc
+    style R2   fill:#1e2535,stroke:#2a3550,color:#ccc
+    style OUT  fill:#2a1a4a,stroke:#5a3a9a,color:#cc99ff
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">MIDDLE FC→DC 位置选取规则对照</div>
+    <table>
+      <thead>
+        <tr><th>Rule</th><th>条件</th><th>逻辑</th><th>目的</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>Rule 1</code></td>
+          <td>无保质期要求 + 多 location</td>
+          <td>找最接近 excess qty 的单个 location；若误差 &gt;15% 则从小到大累积</td>
+          <td>尽量整 location 操作，减少拆 lot</td>
+        </tr>
+        <tr>
+          <td><code>Rule 2</code></td>
+          <td>无保质期要求 + 单 location</td>
+          <td>只转 excess qty，FC 保留 adl×30D</td>
+          <td>最小化操作量，不动用整个 location</td>
+        </tr>
+        <tr>
+          <td><code>Rule 3</code></td>
+          <td>need_minimal_exp=1 + 多 location</td>
+          <td>按 exp_date 降序，最远日期先移出，累积到 excess</td>
+          <td>FC 保留最近到期批次，FEFO 最优</td>
+        </tr>
+        <tr>
+          <td><code>Rule 4</code></td>
+          <td>need_minimal_exp=1 + 单 location</td>
+          <td>只转 excess qty，FC 保留最近批次</td>
+          <td>保质期敏感 SKU 的 excess-only 移出</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════ TAB: 参数参考 ════════ -->
+<div class="tab-panel" id="tab-params">
+  <div class="card">
+    <div class="card-title">🎛 全量参数参考</div>
+    <div class="grid2">
+
+      <div class="param-block">
+        <h3>分层阈值（Sidebar）</h3>
+        <div class="param-row"><span class="param-key">aod_top</span><span class="param-val">21 天</span></div>
+        <div class="param-row"><span class="param-key">ol_top</span><span class="param-val">30 单（30D）</span></div>
+        <div class="param-row"><span class="param-key">ol_tail</span><span class="param-val">8 单（30D）</span></div>
+      </div>
+
+      <div class="param-block">
+        <h3>TOP 补货参数</h3>
+        <div class="param-row"><span class="param-key">top_trigger_d2s</span><span class="param-val">28D（触发补货）</span></div>
+        <div class="param-row"><span class="param-key">top_target_d2s</span><span class="param-val">28D（补货目标）</span></div>
+      </div>
+
+      <div class="param-block">
+        <h3>MIDDLE 补货参数</h3>
+        <div class="param-row"><span class="param-key">mid_routine_d2s</span><span class="param-val">28D（常规补货触发线）</span></div>
+        <div class="param-row"><span class="param-key">mid_emergency_d2s</span><span class="param-val">14D（紧急补货触发线）</span></div>
+        <div class="param-row"><span class="param-key">mid_target_d2s</span><span class="param-val">28D（补货目标）</span></div>
+      </div>
+
+      <div class="param-block">
+        <h3>MIDDLE 驱逐参数</h3>
+        <div class="param-row"><span class="param-key">mid_evict_d2s</span><span class="param-val">30D（驱逐触发线）</span></div>
+        <div class="param-row"><span class="param-key">min_loc_qty</span><span class="param-val">5 件（最小转移量）</span></div>
+      </div>
+
+      <div class="param-block">
+        <h3>产能参数（日调度）</h3>
+        <div class="param-row"><span class="param-key">daily_cap_in</span><span class="param-val">DC→FC 每日最大 SKU 数</span></div>
+        <div class="param-row"><span class="param-key">daily_cap_out</span><span class="param-val">FC→DC 每日最大 SKU 数</span></div>
+        <div class="param-row"><span class="param-key">daily_pallet_cap_in</span><span class="param-val">DC→FC 每日最大 Pallet 数</span></div>
+        <div class="param-row"><span class="param-key">daily_pallet_cap_out</span><span class="param-val">FC→DC 每日最大 Pallet 数</span></div>
+        <div class="param-row"><span class="param-key">plan_days</span><span class="param-val">计划调度窗口天数</span></div>
+      </div>
+
+      <div class="param-block">
+        <h3>容量约束（来自 Capacity Tab）</h3>
+        <div class="param-row"><span class="param-key">fc_free_locs</span><span class="param-val">FC 当前空位数（实时）</span></div>
+        <div class="param-row"><span class="param-key">fc_free_vol</span><span class="param-val">FC 当前空余体积（实时）</span></div>
+        <div class="param-row"><span class="param-key">PALLET_VOL</span><span class="param-val">110,592 in³（6ft pallet）</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">D2S 触发线总览（MIDDLE 决策区间）</div>
+    <div class="mermaid">
+flowchart LR
+    Z0["0D"] --> Z14["14D\n紧急补货"] --> Z28["28D\n常规补货线\n补货目标"] --> Z30["30D\n驱逐触发线"] --> ZINF["∞"]
+
+    subgraph ZONES["FC D2S 状态区间"]
+        ZA["< 14D\n🚨 紧急 DC→FC"]
+        ZB["14D ~ 28D\n⚠️ 常规 DC→FC"]
+        ZC["28D ~ 30D\n✅ KEEP 不动"]
+        ZD["> 30D\n🔴 FC→DC 驱逐"]
+    end
+
+    style ZA fill:#3a1a1a,stroke:#7a2a2a,color:#ff7c7c
+    style ZB fill:#3a2510,stroke:#7a5520,color:#ffb347
+    style ZC fill:#1a3a2a,stroke:#2a6a4a,color:#5fd98a
+    style ZD fill:#2a1a4a,stroke:#5a3a9a,color:#cc99ff
+    </div>
+  </div>
+</div>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#161b27',
+      primaryColor: '#1e3a5f',
+      primaryTextColor: '#e0e0e0',
+      primaryBorderColor: '#2a6aaf',
+      lineColor: '#3a4a6a',
+      secondaryColor: '#1a3a2a',
+      tertiaryColor: '#2a2a2a',
+      edgeLabelBackground: '#1a1f2e',
+      clusterBkg: '#1a1f2e',
+      titleColor: '#e0e0e0',
+      nodeTextColor: '#e0e0e0',
+    },
+    flowchart: { htmlLabels: true, curve: 'basis', padding: 20 }
+  });
+
+  function switchTab(name) {
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.getElementById('tab-' + name).classList.add('active');
+    event.target.classList.add('active');
+  }
+</script>
+</body>
+</html>

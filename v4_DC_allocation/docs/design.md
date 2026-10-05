@@ -332,7 +332,7 @@ Receiving
 |---|---|---|
 | TOP | FC | `top_fc` |
 | BOTTOM/TAIL | SFC Stock | `tail_sfc` |
-| MIDDLE，need_exp=1，`new_exp < MAX(fc_exp)`（新货比 FC 最好的还差） | FC | `mid_exp_worse_fc` |
+| MIDDLE，need_exp=1，`new_exp < MIN(fc_exp)`（新货比FC最老批次还要早到期） | FC | `mid_exp_earlier_fc` |
 | MIDDLE，无 EXP trigger，或 `new_exp >= MAX(fc_exp)` | 走 D2S 判断 | — |
 | MIDDLE，无 EXP trigger，FC > 28 D2S | SFC Stock | `mid_fc_sufficient` |
 | MIDDLE，无 EXP trigger，FC ≤ 28 D2S，SFC 有货 | SFC Stock | `mid_sfc_has_stock` |
@@ -340,9 +340,9 @@ Receiving
 
 ### 4.3 EXP 比较
 
-> 新货的 `new_exp_date` 与 **FC 该 SKU 所有批次中最晚到期的那一批（`MAX(fc_exp_date)`）** 比较。
-> `new_exp < MAX(fc_exp)` → 新货比 FC 最好的那批**更差** → 进 FC 先出（FIFO）
-> `new_exp >= MAX(fc_exp)` → 新货比 FC 最好的还要好或相等 → 走 D2S 判断流程，可能进 SFC
+> 新货的 `new_exp_date` 与 **FC 该 SKU 所有批次中最早到期的那一批（`MIN(fc_exp_date)`）** 比较。
+> `new_exp < MIN(fc_exp)` → 新货比 FC 最老那批**还要早到期** → 进 FC 先出（FEFO）
+> `new_exp >= MIN(fc_exp)` → 新货不比 FC 最老批次更差 → 走 D2S 判断流程
 
 ### 4.4 输出字段
 
