@@ -62,9 +62,24 @@ t_start = time.perf_counter()
 import fcntl as _fcntl
 _LOCK_FILE = Path("results/refresh.lock")
 _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# Stale lock check: if lock file has a PID and that process is dead, remove it
+if _LOCK_FILE.exists():
+    try:
+        _old_pid = int(_LOCK_FILE.read_text().strip())
+        # Check if PID is still alive
+        os.kill(_old_pid, 0)
+        # Process exists — let flock decide below
+    except (ValueError, ProcessLookupError, PermissionError):
+        # PID dead or unreadable — stale lock, remove it
+        _LOCK_FILE.unlink(missing_ok=True)
+        print(f"[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Removed stale lock (dead PID).")
+
 _lock_fh = open(_LOCK_FILE, "w")
 try:
     _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+    _lock_fh.write(str(os.getpid()))
+    _lock_fh.flush()
 except BlockingIOError:
     print(f"[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Another refresh already running — skipping.")
     _lock_fh.close()
