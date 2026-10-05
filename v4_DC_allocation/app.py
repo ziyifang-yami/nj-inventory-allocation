@@ -1135,26 +1135,93 @@ with tab_sfc2fc:
             for c in ["qty_to_transfer","case_qty","fc_d2s","avg_daily_orders"]:
                 if c in tdf.columns:
                     tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
-            # Filters
-            _fc1, _fc2 = st.columns([2,1])
+
+            # ── Filters + Rows/Page — single row ─────────────
+            _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 1, 1, 0.7])
             with _fc1:
-                _s = st.text_input("🔍 Item Number", key=f"s_{key}", placeholder="e.g. 100123")
+                _s = st.text_input("🔍 SKU", key=f"s_{key}", placeholder="Item number")
             with _fc2:
                 _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
                 _sf = st.selectbox("Segment", _segs, key=f"sf_{key}")
+            with _fc3:
+                _loctypes = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
+                _lf = st.selectbox("Loc Type", _loctypes, key=f"lf_{key}")
+            with _fc4:
+                st.selectbox("Rows/Page", options=[50, 100, 200, 500, "All"],
+                             index=1, key=f"rowlimit_{key}", label_visibility="visible")
+
             if _s:
                 tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
             if _sf != "All" and "segment" in tdf.columns:
                 tdf = tdf[tdf["segment"] == _sf]
-            sort_c = [c for c in ["avg_daily_orders","fc_d2s"] if c in tdf.columns]
-            if sort_c:
-                tdf = tdf.sort_values(sort_c, ascending=[False,True], na_position="last")
+            if _lf != "All" and "loc_type" in tdf.columns:
+                tdf = tdf[tdf["loc_type"] == _lf]
+
+            # ── Sort ──────────────────────────────────────────
+            if "segment" in tdf.columns and "location_no" in tdf.columns:
+                tdf["_seg_order"] = tdf["segment"].map({"TOP": 0, "MIDDLE": 1}).fillna(2)
+                tdf = tdf.sort_values(["_seg_order", "location_no"], ascending=[True, True], na_position="last")
+                tdf = tdf.drop(columns=["_seg_order"])
+            elif "location_no" in tdf.columns:
+                tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
+
             tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
             tdf = tdf.rename(columns=_RENAME)
-            st.dataframe(tdf, use_container_width=True, height=500)
-            st.download_button(f"⬇ {label} CSV", tdf.to_csv(index=False).encode(),
-                               file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv",
-                               key=f"dl_main_{key}")
+
+            # ── Pagination state ──────────────────────────────
+            total_rows = len(tdf)
+            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
+            caption = f"Total {total_rows:,} rows · {n_skus} SKUs"
+            if extra:
+                caption += f" · {extra}"
+            _preset = st.session_state.get(f"rowlimit_{key}", 100)
+            _page   = st.session_state.get(f"page_{key}", 1)
+            _per_page = total_rows if _preset == "All" else int(_preset)
+            _total_pages = max(1, -(-total_rows // _per_page))
+            _page = max(1, min(_page, _total_pages))
+            st.session_state[f"page_{key}"] = _page
+            tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+
+            # ── Caption + Download ────────────────────────────
+            _cap_col, _dl_col = st.columns([4, 1])
+            with _cap_col:
+                st.caption(caption)
+            with _dl_col:
+                st.download_button(
+                    "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
+                    file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv",
+                    key=f"dl_main_{key}", use_container_width=True,
+                )
+
+            st.dataframe(tdf_show, use_container_width=True)
+
+            # ── CSS + page nav ────────────────────────────────
+            st.markdown("""<style>
+            div[data-testid="stTextInput"] > div > div > input { max-width: 32px !important; }
+            </style>""", unsafe_allow_html=True)
+
+            if _total_pages > 1:
+                _nav_left, _nav_right = st.columns([5.0, 0.8])
+                with _nav_right:
+                    _n1, _n2, _n3, _n4, _n5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
+                    with _n1:
+                        if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                            st.session_state[f"page_{key}"] = _page - 1; st.rerun()
+                    with _n2:
+                        st.markdown('<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
+                    with _n3:
+                        _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
+                        try:
+                            _go_int = int(_go)
+                            if 1 <= _go_int <= _total_pages and _go_int != _page:
+                                st.session_state[f"page_{key}"] = _go_int; st.rerun()
+                        except ValueError:
+                            pass
+                    with _n4:
+                        st.markdown(f'<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
+                    with _n5:
+                        if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                            st.session_state[f"page_{key}"] = _page + 1; st.rerun()
 
     # ── T1 tab: slider + cache ────────────────────────────────────────────────
     with _sfc_t1:
