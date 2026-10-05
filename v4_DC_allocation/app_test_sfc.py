@@ -494,25 +494,28 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            _c1, _c2, _c3, _c4 = st.columns([0.4, 1, 0.4, 1.5])
-            with _c1:
+            _, _cp, _lbl, _np, _cn = st.columns([2, 0.4, 0.6, 0.8, 0.4])
+            with _cp:
                 if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                     st.session_state[f"page_{key}"] = _page - 1
                     st.rerun()
-            with _c2:
-                st.markdown(f'<p style="text-align:center;font-size:0.82rem;color:#555;margin:0;padding-top:6px">Page {_page} / {_total_pages}</p>', unsafe_allow_html=True)
-            with _c3:
-                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                    st.session_state[f"page_{key}"] = _page + 1
-                    st.rerun()
-            with _c4:
-                _go = st.number_input(
-                    "Go to page", min_value=1, max_value=_total_pages,
-                    value=_page, step=1, key=f"page_input_{key}",
+            with _lbl:
+                st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:7px;text-align:right">Page</p>', unsafe_allow_html=True)
+            with _np:
+                _go = st.text_input(
+                    "p", value=str(_page), key=f"page_input_{key}",
                     label_visibility="collapsed",
                 )
-                if int(_go) != _page:
-                    st.session_state[f"page_{key}"] = int(_go)
+                try:
+                    _go_int = int(_go)
+                    if 1 <= _go_int <= _total_pages and _go_int != _page:
+                        st.session_state[f"page_{key}"] = _go_int
+                        st.rerun()
+                except ValueError:
+                    pass
+            with _cn:
+                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                    st.session_state[f"page_{key}"] = _page + 1
                     st.rerun()
 
     if _total_pages > 1:
