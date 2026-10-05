@@ -494,29 +494,26 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            # select_slider: clean, compact, no column spreading
-            # Only show a window of pages around current to keep it short
-            _window = sorted(set(
-                [1, _total_pages] +
-                list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
-            ))
-            # Convert to strings for display, mark current
-            _options = [str(p) for p in range(1, _total_pages + 1)]
-
-            st.markdown("""<style>
-            div[data-testid="stSlider"] {margin-top:2px}
-            div[data-testid="stSlider"] > label {display:none}
-            </style>""", unsafe_allow_html=True)
-
-            _sel = st.select_slider(
-                "page", options=_options,
-                value=str(_page),
-                key=f"pgnav_{key}",
-                label_visibility="collapsed",
-            )
-            if int(_sel) != _page:
-                st.session_state[f"page_{key}"] = int(_sel)
-                st.rerun()
+            _c1, _c2, _c3, _c4 = st.columns([0.4, 1, 0.4, 1.5])
+            with _c1:
+                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                    st.session_state[f"page_{key}"] = _page - 1
+                    st.rerun()
+            with _c2:
+                st.markdown(f'<p style="text-align:center;font-size:0.82rem;color:#555;margin:0;padding-top:6px">Page {_page} / {_total_pages}</p>', unsafe_allow_html=True)
+            with _c3:
+                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                    st.session_state[f"page_{key}"] = _page + 1
+                    st.rerun()
+            with _c4:
+                _go = st.number_input(
+                    "Go to page", min_value=1, max_value=_total_pages,
+                    value=_page, step=1, key=f"page_input_{key}",
+                    label_visibility="collapsed",
+                )
+                if int(_go) != _page:
+                    st.session_state[f"page_{key}"] = int(_go)
+                    st.rerun()
 
     if _total_pages > 1:
         pass
