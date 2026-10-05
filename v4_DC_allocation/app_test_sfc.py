@@ -444,25 +444,31 @@ def _render_table(tdf, key, label, extra_caption=""):
     if extra_caption:
         caption += f" · {extra_caption}"
 
-    # ── Caption + Rows selector on same line ──────────────────
-    _cap_col, _rows_col = st.columns([3, 1])
+    # ── Caption + Download on same line ───────────────────────
+    _cap_col, _dl_col = st.columns([3, 1])
     with _cap_col:
         st.caption(caption)
-    with _rows_col:
-        _preset = st.selectbox(
-            "Rows to show", options=["All", 500, 200, 100, 50],
-            index=3,  # default 100
-            key=f"rowlimit_{key}", label_visibility="collapsed",
+    with _dl_col:
+        st.download_button(
+            "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
+            file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
+            use_container_width=True,
         )
 
-    if _preset != "All":
-        tdf = tdf.iloc[:int(_preset)]
+    # ── Apply row limit before rendering ─────────────────────
+    _preset = st.session_state.get(f"rowlimit_{key}", 100)
+    tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
 
-    st.dataframe(tdf, use_container_width=True)
-    st.download_button(
-        f"⬇ {label} CSV", tdf.to_csv(index=False).encode(),
-        file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
-    )
+    st.dataframe(tdf_show, use_container_width=True)
+
+    # ── rows/page selector — bottom right under table ─────────
+    _, _rows_col = st.columns([3, 1])
+    with _rows_col:
+        st.selectbox(
+            "rows/page", options=["All", 500, 200, 100, 50],
+            index=3,  # default 100
+            key=f"rowlimit_{key}", label_visibility="visible",
+        )
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
