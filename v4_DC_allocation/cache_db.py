@@ -109,6 +109,20 @@ CREATE TABLE IF NOT EXISTS fc2sfc_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_fc2sfc_list_id ON fc2sfc_tasks(list_id);
 
+CREATE TABLE IF NOT EXISTS fc2sfc_triggers (
+    trigger_type     TEXT NOT NULL,
+    item_number      TEXT NOT NULL,
+    fc_qty           REAL,
+    sfc_qty          REAL,
+    fc_d2s           REAL,
+    avg_daily_orders REAL,
+    excess_qty       REAL,
+    keep_qty         REAL,
+    seg              TEXT,
+    PRIMARY KEY (trigger_type, item_number)
+);
+CREATE INDEX IF NOT EXISTS idx_fc2sfc_triggers_type ON fc2sfc_triggers(trigger_type);
+
 CREATE TABLE IF NOT EXISTS task_list (
     list_id          TEXT NOT NULL,
     item_number      TEXT,
@@ -353,6 +367,52 @@ class CacheDB:
         df["excess_qty"]       = pd.to_numeric(df["excess_qty"], errors="coerce").fillna(0)
         df["keep_qty"]         = pd.to_numeric(df["keep_qty"], errors="coerce").fillna(0)
         df["excess_vol"]       = pd.to_numeric(df["excess_vol"], errors="coerce").fillna(0)
+        return df
+
+    # ── FC→SFC triggers (full SKU-level, no lot detail) ───────────────────────
+
+    _TRIGGER_COLS = [
+        "trigger_type","item_number","fc_qty","sfc_qty","fc_d2s",
+        "avg_daily_orders","excess_qty","keep_qty","seg",
+    ]
+
+    def write_fc2sfc_triggers(self, df: pd.DataFrame):
+        """Write full trigger list (ALL SKUs, SKU-level only, no lot detail)."""
+        if df is None or df.empty:
+            return
+        df = df.copy()
+        df["item_number"] = df["item_number"].astype(str)
+        for col in self._TRIGGER_COLS:
+            if col not in df.columns:
+                df[col] = None
+        rows = df[self._TRIGGER_COLS].values.tolist()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM fc2sfc_triggers")
+            conn.executemany(
+                "INSERT OR REPLACE INTO fc2sfc_triggers VALUES(?,?,?,?,?,?,?,?,?)", rows
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("fc2sfc_triggers", datetime.now(UTC).isoformat()),
+            )
+
+    def read_fc2sfc_triggers(self, trigger_type: str | None = None) -> pd.DataFrame:
+        """Read trigger summary. trigger_type: 'MIDDLE_EVICT' | 'TAIL_CLEAR' | None (all)."""
+        with self._conn() as conn:
+            if trigger_type:
+                cur = conn.execute(
+                    "SELECT * FROM fc2sfc_triggers WHERE trigger_type=?", (trigger_type,)
+                )
+            else:
+                cur = conn.execute("SELECT * FROM fc2sfc_triggers")
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        for c in ["fc_qty","sfc_qty","fc_d2s","avg_daily_orders","excess_qty","keep_qty"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
         return df
 
     # ── SFC lots ──────────────────────────────────────────────────────────────

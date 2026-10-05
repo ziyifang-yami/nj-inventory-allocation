@@ -123,12 +123,10 @@ with _timed("Classify"):
     df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                             df["fc_qty"] / df["avg_daily_orders"], np.nan)
 
-# ── Step 4: Trigger counts (instant, no lot data) ─────────────────────────────
+# ── Step 4: Trigger counts — read from SQLite fc2sfc_triggers ─────────────────
 with _timed("Triggers"):
-    cfg = dict(P)
-    df_triggered = compute_fc_to_sfc(df, cfg)
-    df_mid_trigger  = df_triggered[df_triggered["trigger"]=="MIDDLE_EVICT"] if not df_triggered.empty else pd.DataFrame()
-    df_tail_trigger = df_triggered[df_triggered["trigger"]=="TAIL_CLEAR"]   if not df_triggered.empty else pd.DataFrame()
+    df_mid_trigger  = DB_CACHE.read_fc2sfc_triggers("MIDDLE_EVICT")
+    df_tail_trigger = DB_CACHE.read_fc2sfc_triggers("TAIL_CLEAR")
 
 # ── Step 5: Read location-level task lists from SQLite ────────────────────────
 with _timed("FC→SFC Tasks"):
