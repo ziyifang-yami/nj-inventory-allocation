@@ -495,7 +495,7 @@ def _render_table(tdf, key, label, extra_caption=""):
         _prev = _pn
 
     # ── Footer: dropdown far left · nav far right ─────────────
-    _fc1, _spacer, _fc2, _fc3, _fc4, _fc5 = st.columns([1.0, 4.5, 0.25, 0.8, 0.5, 0.25])
+    _fc1, _spacer, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([0.8, 4.0, 0.2, 0.35, 0.5, 0.35, 0.2])
     with _fc1:
         st.selectbox(
             "Rows/Page", options=[50, 100, 200, 500, "All"],
@@ -506,12 +506,9 @@ def _render_table(tdf, key, label, extra_caption=""):
             if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                 st.session_state[f"page_{key}"] = _page - 1; st.rerun()
         with _fc3:
-            st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page of</p>', unsafe_allow_html=True)
+            st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
         with _fc4:
-            _go = st.text_input(
-                f"/{_total_pages}", value=str(_page),
-                key=f"page_input_{key}", label_visibility="visible",
-            )
+            _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
             try:
                 _go_int = int(_go)
                 if 1 <= _go_int <= _total_pages and _go_int != _page:
@@ -519,6 +516,8 @@ def _render_table(tdf, key, label, extra_caption=""):
             except ValueError:
                 pass
         with _fc5:
+            st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
+        with _fc6:
             if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                 st.session_state[f"page_{key}"] = _page + 1; st.rerun()
 
