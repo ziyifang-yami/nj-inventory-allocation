@@ -13,6 +13,7 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 import pymysql
+import os
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -155,7 +156,9 @@ cfg = dict(P)
 cfg["t1_top_target_d2s"] = 7
 cfg["t1_mid_target_d2s"] = 7
 
-# ── Auto-refresh: if any table is overdue, trigger background refresh ─────────
+# ── Auto-refresh: if any table is overdue, kick off background refresh ────────
+# This is a safety net — cron normally handles this every 30min.
+# If cron missed a run (stale lock etc.), this catches it silently.
 _OVERDUE = {
     "sales":     12 * 60,   # 12h in minutes
     "exp_flags": 12 * 60,
@@ -164,7 +167,27 @@ _OVERDUE = {
 }
 _overdue_tables = [t for t, ttl in _OVERDUE.items() if DB_CACHE.age_minutes(t) > ttl]
 if _overdue_tables:
-    st.info(f"⏳ Data overdue: {', '.join(_overdue_tables)}. Cron will refresh within 30 min. Use sidebar to refresh manually.")
+    st.info(f"⏳ Data overdue: {', '.join(_overdue_tables)}. Triggering background refresh...")
+    try:
+        import subprocess as _sp, sys as _sys
+        _lock = Path("results/refresh.lock")
+        _lock_stale = False
+        if _lock.exists():
+            try:
+                _pid = int(_lock.read_text().strip())
+                os.kill(_pid, 0)   # raises if PID dead
+            except (ValueError, ProcessLookupError, PermissionError):
+                _lock.unlink(missing_ok=True)
+                _lock_stale = True
+        if not _lock.exists():
+            _sp.Popen(
+                [_sys.executable, "refresh_sfc_cache.py"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+            )
+    except Exception:
+        pass  # background refresh failure is non-fatal — cron will catch it
 
 with _timed("Sales"):
     df_sales = DB_CACHE.read_sales()
