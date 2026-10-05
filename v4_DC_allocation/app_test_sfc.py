@@ -481,39 +481,57 @@ def _render_table(tdf, key, label, extra_caption=""):
         _page_items.append(("current" if _pn == _page else "btn", _pn))
         _prev = _pn
 
-    _nav_w = [0.28] * (len(_page_items) + 2)
-    _all_cols = st.columns([0.5, 0.8, 1.5] + _nav_w)
+    _lft_col, _rgt_col = st.columns([1.5, 3])
+    with _lft_col:
+        _rpp_col1, _rpp_col2 = st.columns([1, 1.5])
+        with _rpp_col1:
+            st.markdown('<p style="font-size:0.9rem;color:#444;margin:0;padding-top:8px;white-space:nowrap">rows/page</p>', unsafe_allow_html=True)
+        with _rpp_col2:
+            st.selectbox(
+                "rpp", options=[50, 100, 200, 500, "All"],
+                index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
+            )
 
-    with _all_cols[0]:
-        st.markdown('<p style="font-size:0.9rem;color:#444;margin:0;padding-top:8px;white-space:nowrap">rows/page</p>', unsafe_allow_html=True)
-    with _all_cols[1]:
-        st.selectbox(
-            "rpp", options=[50, 100, 200, 500, "All"],
-            index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
-        )
+    with _rgt_col:
+        if _total_pages > 1:
+            # Render HTML pagination visually — tight and consistent
+            def _pg_btn(pn, current):
+                if pn == current:
+                    return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#4e8df5;color:#fff;border:1px solid #4e8df5;border-radius:6px;padding:0 10px;font-size:0.82rem;font-weight:600;height:30px;min-width:30px;cursor:default">{pn}</span>'
+                return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#333;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:0.82rem;height:30px;min-width:30px">{pn}</span>'
 
-    if _total_pages > 1:
-        _offset = 3
-        with _all_cols[_offset]:
-            if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
-                st.session_state[f"page_{key}"] = _page - 1
-                st.rerun()
-        _offset += 1
-        for _kind, _val in _page_items:
-            with _all_cols[_offset]:
+            def _arrow(symbol, disabled):
+                c = "#ccc" if disabled else "#555"
+                b = "#eee" if disabled else "#ddd"
+                return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:{c};border:1px solid {b};border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:{"default" if disabled else "pointer"}">{symbol}</span>'
+
+            _parts = [_arrow("‹", _page == 1)]
+            for _kind, _val in _page_items:
                 if _kind == "ellipsis":
-                    st.markdown('<p style="font-size:0.75rem;color:#bbb;text-align:center;margin:0;padding-top:6px">…</p>', unsafe_allow_html=True)
-                elif _kind == "current":
-                    st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:4px;text-align:center;font-size:0.75rem;font-weight:600;padding:3px 0;margin-top:3px">{_val}</div>', unsafe_allow_html=True)
+                    _parts.append('<span style="display:inline-flex;align-items:center;color:#bbb;padding:0 4px;font-size:0.85rem;height:30px">…</span>')
                 else:
-                    if st.button(str(_val), key=f"pg_{key}_{_val}"):
-                        st.session_state[f"page_{key}"] = _val
-                        st.rerun()
-            _offset += 1
-        with _all_cols[_offset]:
-            if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                st.session_state[f"page_{key}"] = _page + 1
-                st.rerun()
+                    _parts.append(_pg_btn(_val, _page))
+            _parts.append(_arrow("›", _page == _total_pages))
+
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:4px;justify-content:flex-end;padding-top:2px">{"".join(_parts)}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Actual nav: hidden Streamlit buttons below ─────────────
+    if _total_pages > 1:
+        # Hide these buttons visually — they provide the click functionality
+        st.markdown(f"""<style>
+        div[data-testid="stHorizontalBlock"]:last-of-type button {{
+            opacity: 0 !important;
+            height: 1px !important;
+            min-height: 1px !important;
+            padding: 0 !important;
+            margin: 0 !important;
+            pointer-events: auto !important;
+            position: absolute !important;
+        }}
+        </style>""", unsafe_allow_html=True)
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
     # T1 transfer limit controls
