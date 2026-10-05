@@ -481,39 +481,32 @@ def _render_table(tdf, key, label, extra_caption=""):
         _page_items.append(("current" if _pn == _page else "btn", _pn))
         _prev = _pn
 
-    _lft_col, _rgt_col = st.columns([1.5, 3])
-    with _lft_col:
+    # ── Footer: single row, all tight columns ─────────────────
+    _fc1, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([1.2, 0.8, 0.25, 0.5, 0.25, 3.0])
+    with _fc1:
+        st.markdown('<p style="font-size:0.82rem;color:#444;margin:0;padding-top:8px">Rows/Page</p>', unsafe_allow_html=True)
+    with _fc2:
         st.selectbox(
-            "Rows/Page", options=[50, 100, 200, 500, "All"],
-            index=1, key=f"rowlimit_{key}", label_visibility="visible",
+            "rpp", options=[50, 100, 200, 500, "All"],
+            index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
         )
-
-    with _rgt_col:
-        if _total_pages > 1:
-            # Push to right using a flex container — 3 tight cols, no spacer
-            _cp, _lbl, _np, _cn = st.columns([0.3, 0.4, 0.6, 0.3])
-            with _cp:
-                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
-                    st.session_state[f"page_{key}"] = _page - 1
-                    st.rerun()
-            with _lbl:
-                st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:7px;text-align:right;white-space:nowrap">Page</p>', unsafe_allow_html=True)
-            with _np:
-                _go = st.text_input(
-                    "p", value=str(_page), key=f"page_input_{key}",
-                    label_visibility="collapsed",
-                )
-                try:
-                    _go_int = int(_go)
-                    if 1 <= _go_int <= _total_pages and _go_int != _page:
-                        st.session_state[f"page_{key}"] = _go_int
-                        st.rerun()
-                except ValueError:
-                    pass
-            with _cn:
-                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                    st.session_state[f"page_{key}"] = _page + 1
-                    st.rerun()
+    if _total_pages > 1:
+        with _fc3:
+            if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                st.session_state[f"page_{key}"] = _page - 1; st.rerun()
+        with _fc4:
+            _go = st.text_input("p", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
+            try:
+                _go_int = int(_go)
+                if 1 <= _go_int <= _total_pages and _go_int != _page:
+                    st.session_state[f"page_{key}"] = _go_int; st.rerun()
+            except ValueError:
+                pass
+        with _fc5:
+            if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                st.session_state[f"page_{key}"] = _page + 1; st.rerun()
+        with _fc6:
+            st.caption(f"Page {_page} of {_total_pages}")
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
