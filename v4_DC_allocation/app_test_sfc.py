@@ -449,12 +449,12 @@ def _render_table(tdf, key, label, extra_caption=""):
     tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
 
     # ── Caption + Download on same line ───────────────────────
-    _cap_col, _dl_col = st.columns([4, 1])
+    _cap_col, _dl_col = st.columns([5, 1])
     with _cap_col:
         st.caption(caption)
     with _dl_col:
         st.download_button(
-            "⬇️ CSV", tdf_show.to_csv(index=False).encode(),
+            "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
             file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
             use_container_width=True,
         )
