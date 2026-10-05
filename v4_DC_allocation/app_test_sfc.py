@@ -445,59 +445,74 @@ def _render_table(tdf, key, label, extra_caption=""):
     if extra_caption:
         caption += f" · {extra_caption}"
 
-    # ── rows/page state ───────────────────────────────────────
-    _preset = st.session_state.get(f"rowlimit_{key}", 100)
-    _page   = st.session_state.get(f"page_{key}", 1)
+    # ── rows/page + page state ────────────────────────────────
+    _preset   = st.session_state.get(f"rowlimit_{key}", 100)
+    _page     = st.session_state.get(f"page_{key}", 1)
     _per_page = total_rows if _preset == "All" else int(_preset)
-    _total_pages = max(1, -(-total_rows // _per_page))  # ceil division
+    _total_pages = max(1, -(-total_rows // _per_page))
     _page = max(1, min(_page, _total_pages))
     st.session_state[f"page_{key}"] = _page
-
     tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
 
-    # ── Caption + Download — just above table ─────────────────
-    _cap_col, _dl_col = st.columns([5, 1])
-    with _cap_col:
+    # ── Top bar: caption · rows/page · Download CSV ───────────
+    _c1, _c2, _c3 = st.columns([3, 1, 1])
+    with _c1:
         st.caption(caption)
-    with _dl_col:
+    with _c2:
+        st.selectbox(
+            "rows/page", options=["All", 500, 200, 100, 50],
+            index=3, key=f"rowlimit_{key}", label_visibility="collapsed",
+        )
+    with _c3:
         st.download_button(
             "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
-            file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
-            use_container_width=True,
+            file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv",
+            key=f"dl_{key}", use_container_width=True,
         )
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── Pagination footer: rows/page left · page numbers right ─
-    _lft, _rgt = st.columns([2, 3])
-    with _lft:
-        st.selectbox(
-            "rows/page", options=["All", 500, 200, 100, 50],
-            index=3, key=f"rowlimit_{key}", label_visibility="visible",
-            on_change=lambda: st.session_state.update({f"page_{key}": 1}),
-        )
-    with _rgt:
-        if _total_pages > 1:
-            # Build page buttons: always show first, last, current ±2
-            _shown = sorted(set(
-                [1, _total_pages] +
-                list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
-            ))
-            _btn_cols = st.columns(len(_shown) + 2)
-            with _btn_cols[0]:
-                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
-                    st.session_state[f"page_{key}"] = _page - 1
-                    st.rerun()
-            for _i, _pn in enumerate(_shown):
-                with _btn_cols[_i + 1]:
-                    _label = f"**{_pn}**" if _pn == _page else str(_pn)
-                    if st.button(_label, key=f"pg_{key}_{_pn}"):
-                        st.session_state[f"page_{key}"] = _pn
-                        st.rerun()
-            with _btn_cols[-1]:
-                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                    st.session_state[f"page_{key}"] = _page + 1
-                    st.rerun()
+    # ── Pagination — compact HTML links bottom left ───────────
+    if _total_pages > 1:
+        # Build page list: first, last, current ±2, with ellipsis gaps
+        _shown = sorted(set(
+            [1, _total_pages] +
+            list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
+        ))
+        _parts = []
+        _prev_pn = None
+        for _pn in _shown:
+            if _prev_pn and _pn - _prev_pn > 1:
+                _parts.append('<span style="color:#aaa;padding:0 4px">…</span>')
+            if _pn == _page:
+                _parts.append(f'<span style="background:#4e8df5;color:#fff;border-radius:4px;padding:2px 8px;font-size:0.82rem">{_pn}</span>')
+            else:
+                _parts.append(f'<a href="?page_{key}={_pn}" style="color:#4e8df5;padding:2px 6px;text-decoration:none;font-size:0.82rem">{_pn}</a>')
+            _prev_pn = _pn
+
+        _prev_style = "color:#aaa" if _page == 1 else "color:#4e8df5;cursor:pointer"
+        _next_style = "color:#aaa" if _page == _total_pages else "color:#4e8df5;cursor:pointer"
+
+        _pg_col, _ = st.columns([2, 3])
+        with _pg_col:
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:4px;padding:4px 0">'
+                f'<span style="{_prev_style};font-size:1rem;padding:0 4px">‹</span>'
+                + "".join(_parts) +
+                f'<span style="{_next_style};font-size:1rem;padding:0 4px">›</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        # Actual prev/next buttons (hidden via CSS hack — use tiny expander workaround)
+        _nav_l, _nav_r, _ = st.columns([0.5, 0.5, 4])
+        with _nav_l:
+            if st.button("‹", key=f"prev_{key}", disabled=_page == 1, help="Previous page"):
+                st.session_state[f"page_{key}"] = _page - 1
+                st.rerun()
+        with _nav_r:
+            if st.button("›", key=f"next_{key}", disabled=_page == _total_pages, help="Next page"):
+                st.session_state[f"page_{key}"] = _page + 1
+                st.rerun()
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
