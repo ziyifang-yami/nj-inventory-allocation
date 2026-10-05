@@ -409,8 +409,8 @@ def _render_table(tdf, key, label, extra_caption=""):
         if c in tdf.columns:
             tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
-    # ── Filters — single row ──────────────────────────────────
-    _fc1, _fc2, _fc3 = st.columns([1.2, 1, 1])
+    # ── Filters + Rows/Page — single row ─────────────────────
+    _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 1, 1, 0.7])
     with _fc1:
         _search = st.text_input("🔍 SKU", key=f"search_{key}", placeholder="Item number")
     with _fc2:
@@ -419,6 +419,11 @@ def _render_table(tdf, key, label, extra_caption=""):
     with _fc3:
         _loctypes = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
         _loc_filter = st.selectbox("Loc Type", _loctypes, key=f"loc_{key}")
+    with _fc4:
+        st.selectbox(
+            "Rows/Page", options=[50, 100, 200, 500, "All"],
+            index=1, key=f"rowlimit_{key}", label_visibility="visible",
+        )
 
     if _search:
         tdf = tdf[tdf["item_number"].astype(str).str.contains(_search.strip(), case=False, na=False)]
@@ -467,16 +472,10 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── Inject CSS: narrow the dropdown and page input ────────
+    # ── Inject CSS: narrow page input only ───────────────────
     st.markdown("""<style>
-    div[data-testid="stSelectbox"] > div > div {
-        max-width: 90px !important;
-        min-width: 0 !important;
-    }
     div[data-testid="stTextInput"] > div > div > input {
-        max-width: 55px !important;
-        min-width: 0 !important;
-        padding: 4px 6px !important;
+        max-width: 42px !important;
     }
     </style>""", unsafe_allow_html=True)
 
@@ -494,14 +493,9 @@ def _render_table(tdf, key, label, extra_caption=""):
         _page_items.append(("current" if _pn == _page else "btn", _pn))
         _prev = _pn
 
-    # ── Footer: dropdown far left · nav far right ─────────────
-    _fc1, _spacer, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([0.8, 4.0, 0.2, 0.35, 0.5, 0.35, 0.2])
-    with _fc1:
-        st.selectbox(
-            "Rows/Page", options=[50, 100, 200, 500, "All"],
-            index=1, key=f"rowlimit_{key}", label_visibility="visible",
-        )
+    # ── Footer: page nav far right ────────────────────────────
     if _total_pages > 1:
+        _, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([4.8, 0.2, 0.35, 0.3, 0.35, 0.2])
         with _fc2:
             if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                 st.session_state[f"page_{key}"] = _page - 1; st.rerun()
