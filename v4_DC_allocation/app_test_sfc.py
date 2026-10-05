@@ -440,15 +440,22 @@ def _render_table(tdf, key, label, extra_caption=""):
     tdf = tdf.rename(columns=_COL_RENAME)
 
     n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-    caption = f"{len(tdf):,} rows · {n_skus} SKUs"
+    total_rows = len(tdf)
+    caption = f"Total {total_rows:,} rows · {n_skus} SKUs"
     if extra_caption:
         caption += f" · {extra_caption}"
 
-    # ── Apply row limit (reads from session_state, 100 default) ──
+    # ── rows/page state ───────────────────────────────────────
     _preset = st.session_state.get(f"rowlimit_{key}", 100)
-    tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
+    _page   = st.session_state.get(f"page_{key}", 1)
+    _per_page = total_rows if _preset == "All" else int(_preset)
+    _total_pages = max(1, -(-total_rows // _per_page))  # ceil division
+    _page = max(1, min(_page, _total_pages))
+    st.session_state[f"page_{key}"] = _page
 
-    # ── Caption + Download on same line ───────────────────────
+    tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+
+    # ── Caption + Download — just above table ─────────────────
     _cap_col, _dl_col = st.columns([5, 1])
     with _cap_col:
         st.caption(caption)
@@ -461,15 +468,36 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── rows/page — label + selectbox on same row, bottom right ──
-    _, _lbl_col, _rows_col = st.columns([3, 0.6, 1])
-    with _lbl_col:
-        st.markdown("<div style='padding-top:8px;text-align:right;color:gray;font-size:0.85rem'>rows/page</div>", unsafe_allow_html=True)
-    with _rows_col:
+    # ── Pagination footer: rows/page left · page numbers right ─
+    _lft, _rgt = st.columns([2, 3])
+    with _lft:
         st.selectbox(
             "rows/page", options=["All", 500, 200, 100, 50],
-            index=3, key=f"rowlimit_{key}", label_visibility="collapsed",
+            index=3, key=f"rowlimit_{key}", label_visibility="visible",
+            on_change=lambda: st.session_state.update({f"page_{key}": 1}),
         )
+    with _rgt:
+        if _total_pages > 1:
+            # Build page buttons: always show first, last, current ±2
+            _shown = sorted(set(
+                [1, _total_pages] +
+                list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
+            ))
+            _btn_cols = st.columns(len(_shown) + 2)
+            with _btn_cols[0]:
+                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                    st.session_state[f"page_{key}"] = _page - 1
+                    st.rerun()
+            for _i, _pn in enumerate(_shown):
+                with _btn_cols[_i + 1]:
+                    _label = f"**{_pn}**" if _pn == _page else str(_pn)
+                    if st.button(_label, key=f"pg_{key}_{_pn}"):
+                        st.session_state[f"page_{key}"] = _pn
+                        st.rerun()
+            with _btn_cols[-1]:
+                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                    st.session_state[f"page_{key}"] = _page + 1
+                    st.rerun()
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
