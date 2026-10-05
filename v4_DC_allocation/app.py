@@ -1035,11 +1035,8 @@ with tab_fc2sfc:
 
     def _nskus2(tdf): return tdf["item_number"].nunique() if tdf is not None and not tdf.empty and "item_number" in tdf.columns else 0
     _c1, _c2 = st.columns(2)
-    with _c1:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">🗑️ TAIL Clear</div><div style="font-size:1.1rem;font-weight:600">{_nskus2(_df_tail):,} SKUs</div>', unsafe_allow_html=True)
-    with _c2:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">📤 MIDDLE Evict</div><div style="font-size:1.1rem;font-weight:600">{_nskus2(_df_mid):,} SKUs</div>', unsafe_allow_html=True)
-    st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
+    _c1.metric("🗑️ TAIL Clear", f"{_nskus2(_df_tail):,} SKUs")
+    _c2.metric("📤 MIDDLE Evict", f"{_nskus2(_df_mid):,} SKUs")
 
     _fc2sfc_tail_tab, _fc2sfc_mid_tab = st.tabs([
         f"🗑️ TAIL Clear — FC→SFC  ({len(_df_tail):,} rows)",
@@ -1165,15 +1162,10 @@ with tab_sfc2fc:
     _n_t1 = _n(_t1_cached) if not (_t1_cached is None or _t1_cached.empty) else _n(_db.read_task_list("T1"))
 
     h1, h2, h3, h4 = st.columns(4)
-    with h1:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">🚨 T1 — Emergency</div><div style="font-size:1.1rem;font-weight:600">{_nskus(_t1_cached):,} SKUs</div>', unsafe_allow_html=True)
-    with h2:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">📦 T2 — Replenishment</div><div style="font-size:1.1rem;font-weight:600">{_nskus(_t2):,} SKUs</div>', unsafe_allow_html=True)
-    with h3:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">🔄 T3 — Bin→Stock</div><div style="font-size:1.1rem;font-weight:600">{_nskus(_t3):,} SKUs</div>', unsafe_allow_html=True)
-    with h4:
-        st.markdown(f'<div style="font-size:0.78rem;color:#888">📅 T4 — Date Switch</div><div style="font-size:1.1rem;font-weight:600">{_nskus(_t4):,} SKUs</div>', unsafe_allow_html=True)
-    st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
+    h1.metric("🚨 T1 — Emergency", f"{_nskus(_t1_cached):,} SKUs")
+    h2.metric("📦 T2 — Replenishment", f"{_nskus(_t2):,} SKUs")
+    h3.metric("🔄 T3 — Bin→Stock", f"{_nskus(_t3):,} SKUs")
+    h4.metric("📅 T4 — Date Switch", f"{_nskus(_t4):,} SKUs")
 
     _sfc_t1, _sfc_t2, _sfc_t3, _sfc_t4 = st.tabs([
         f"🚨 T1 — Emergency Transfer SFC→FC  ({_n_t1:,} rows)",
