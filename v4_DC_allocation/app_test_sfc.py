@@ -448,7 +448,8 @@ def _render_table(tdf, key, label, extra_caption=""):
     # ── rows/page + page state ────────────────────────────────
     _preset   = st.session_state.get(f"rowlimit_{key}", 100)
     _page     = st.session_state.get(f"page_{key}", 1)
-    _per_page = total_rows if _preset == "All" else int(_preset)    _total_pages = max(1, -(-total_rows // _per_page))
+    _per_page = total_rows if _preset == "All" else int(_preset)
+    _total_pages = max(1, -(-total_rows // _per_page))
     _page = max(1, min(_page, _total_pages))
     st.session_state[f"page_{key}"] = _page
     tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
