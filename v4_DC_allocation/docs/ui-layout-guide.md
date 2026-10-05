@@ -27,26 +27,30 @@ The pagination footer is in `_render_table()` function, around line 497.
 
 ### 1. Nav position (how far right)
 ```python
-_nav_left, _nav_right = st.columns([5.2, 1.6])
+_nav_left, _nav_right = st.columns([5.0, 0.8])
 ```
 | Param | Controls | Change |
 |-------|----------|--------|
-| `5.2` | Spacer on left | Bigger → nav pushed further right |
-| `1.6` | Width of entire nav block | Smaller → elements closer together |
+| `5.0` | Spacer on left | Bigger → nav pushed further right |
+| `0.8` | Width of entire nav block | Smaller → elements closer together |
+
+**✅ PERFECT baseline: `[5.0, 0.8]`**
 
 ---
 
 ### 2. Inner column widths (spacing between elements)
 ```python
-_c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.35, 0.25, 0.3, 0.2])
+_c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
 ```
 | Column | Element | Increase = |
 |--------|---------|-----------|
 | `_c1 = 0.2` | `‹` prev button | more space around `‹` |
-| `_c2 = 0.35` | `Page` text | more space, won't wrap |
-| `_c3 = 0.25` | page number input | wider input field |
-| `_c4 = 0.3` | `/ 43` total text | more space for total |
+| `_c2 = 0.2` | `Page` text | more space, won't wrap |
+| `_c3 = 0.2` | page number input | wider input field |
+| `_c4 = 0.2` | `/ 43` total text | more space for total |
 | `_c5 = 0.2` | `›` next button | more space around `›` |
+
+**✅ PERFECT baseline: `[0.2, 0.2, 0.2, 0.2, 0.2]`**
 
 > **Important:** `_c2` must be wide enough or "Page" wraps to two lines.  
 > Always keep `white-space:nowrap` in the `Page` markdown style.
@@ -59,24 +63,22 @@ div[data-testid="stTextInput"] > div > div > input {
     max-width: 32px !important;
 }
 ```
-| Value | Result |
-|-------|--------|
-| `32px` | tight — fits 2-3 digits |
-| `42px` | comfortable for 3 digits |
-| `55px` | wider, more padding |
+**✅ PERFECT baseline: `32px`**
 
 ---
 
-### 4. Vertical alignment of "Page" and "/ 43" text
+### 4. Font size and vertical alignment of "Page" and "/ 43" text
 ```python
 # _c2 — "Page" text
-'padding-top:8px'
+'font-size:1rem;padding-top:8px'
 
 # _c4 — "/ 43" text  
-'padding-top:8px'
+'font-size:1rem;padding-top:8px'
 ```
-- Adjust `padding-top` to vertically center text with button height.
-- Try `6px`, `8px`, `10px` depending on browser/font rendering.
+**✅ PERFECT baseline: `font-size:1rem`, `padding-top:8px`**
+
+- `font-size` controls text size: `0.82rem` = small, `1rem` = default body, `1.1rem` = slightly larger
+- `padding-top` controls vertical position — adjust if text looks too high/low after font change
 
 ---
 
