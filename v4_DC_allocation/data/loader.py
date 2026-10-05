@@ -1002,3 +1002,65 @@ def load_sfc_lot_data_all():
 
     except Exception as exc:
         return None, str(exc)
+
+
+# ── Pending putaway: items received but not yet put away ──────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)  # 5-minute cache — changes as staff work
+def load_pending_putaway():
+    """
+    Query NJ warehouse for items received but not yet put away.
+
+    Items sitting in RECG (location_type=1) staging locations are received
+    goods waiting to be moved to their final Stock/Bin location.
+
+    Data source: wh_inventory_transaction JOIN wh_storage_location
+    Filter: warehouse_number='002', location_type=1, quantity>0
+
+    Verified 2026-10-05:
+    - 1,000 RECG locations (RECG0001~RECG1000)
+    - location_type=1 ↔ RECG prefix: 100% correspondence
+    - Typical: 50-150 SKUs / 2,000-5,000 units pending at any time
+
+    Returns
+    -------
+    (DataFrame, None) on success:
+        Columns: item_number, location_no, waiting_putaway_qty, last_update
+    (None, str) on failure.
+    """
+    try:
+        conn = _connect()
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT
+                    it.item_number,
+                    it.location_no,
+                    SUM(it.quantity)                AS waiting_putaway_qty,
+                    FROM_UNIXTIME(MAX(it.edit_dtm)) AS last_update
+                FROM yamibuy_wh.wh_inventory_transaction it
+                JOIN yamibuy_wh.wh_storage_location sl
+                    ON  sl.warehouse_number = it.warehouse_number
+                    AND sl.location_no      = it.location_no
+                WHERE it.warehouse_number = '002'
+                  AND it.quantity > 0
+                  AND sl.location_type = 1
+                GROUP BY it.item_number, it.location_no
+                ORDER BY waiting_putaway_qty DESC
+            """)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        conn.close()
+
+        if not rows:
+            return pd.DataFrame(
+                columns=["item_number", "location_no", "waiting_putaway_qty", "last_update"]
+            ), None
+
+        df = pd.DataFrame(rows, columns=cols)
+        df["item_number"]          = df["item_number"].astype(str)
+        df["waiting_putaway_qty"]  = pd.to_numeric(df["waiting_putaway_qty"], errors="coerce").fillna(0).astype(int)
+        df["last_update"]          = pd.to_datetime(df["last_update"], errors="coerce")
+        return df, None
+
+    except Exception as exc:
+        return None, str(exc)

@@ -729,3 +729,83 @@ END AS case_qty
 cd c:\Project-Z\NJ_Inventory_Allocation
 python _diag_fc.py
 ```
+
+---
+
+## 10. Putaway 数据源 — 待上架库存
+
+> 验证日期：2026-10-05  
+> 验证方式：直接查询生产 MySQL，测试脚本 `_test_putaway_sql.py`
+
+### 10.1 数据源定义
+
+**待上架（Received, Waiting for Putaway）** = 货物已收进收货暂存位（RECG 前缀），尚未被 Receiving Put Away 移到货架 Stock/Bin 位。
+
+| 要素 | 说明 |
+|------|------|
+| **物理位置** | `location_no LIKE 'RECG%'`（RECG0001 ~ RECG1000，共 1,000 个暂存位） |
+| **location_type** | `1` = RECEIVING_SELLABLE_TOTE（好货待上架暂存位） |
+| **等价条件** | `location_type = 1` ↔ `location_no LIKE 'RECG%'`，100% 对应，无例外 |
+| **数据表** | `yamibuy_wh.wh_inventory_transaction`（实时库存） |
+| **过滤条件** | `warehouse_number = '002'` AND `quantity > 0` AND `sl.location_type = 1` |
+| **不含坏货** | `location_type = 2`（RECN 前缀）为 unsellable，默认排除 |
+
+### 10.2 验证结果（2026-10-05）
+
+```
+RECG 位数量：   1,000 个（RECG0001 ~ RECG1000）
+当前待上架：    96 SKUs / 3,519 units（全部堆在 RECG0001 共用暂存位）
+RECG = type=1：100% 对应，无其他前缀
+```
+
+### 10.3 SQL（load_pending_putaway）
+
+```sql
+-- 批量查询：NJ 当前所有待上架货物
+SELECT
+    it.item_number,
+    it.location_no,
+    SUM(it.quantity)               AS waiting_putaway_qty,
+    FROM_UNIXTIME(MAX(it.edit_dtm)) AS last_update
+FROM yamibuy_wh.wh_inventory_transaction it
+JOIN yamibuy_wh.wh_storage_location sl
+    ON  sl.warehouse_number = it.warehouse_number
+    AND sl.location_no      = it.location_no
+WHERE it.warehouse_number = '002'
+  AND it.quantity > 0
+  AND sl.location_type = 1          -- RECG 收货暂存位
+GROUP BY it.item_number, it.location_no
+ORDER BY waiting_putaway_qty DESC;
+```
+
+**注意：** `edit_dtm` 对部分老批次为 NULL（NaT），不影响 quantity 准确性，查询仍可用。
+
+### 10.4 Putaway 决策所需额外字段
+
+从待上架数据获得 `item_number` 后，需 JOIN 以下数据：
+
+| 字段 | 来源 | 用途 |
+|------|------|------|
+| `seg` | 现有 classify 逻辑（Athena + 库存） | TOP/MIDDLE/TAIL 判断 |
+| `fc_d2s` | 现有 `df` | MIDDLE 是否 FC 充足 |
+| `sfc_qty` | 现有 `df` | MIDDLE SFC 是否有货 |
+| `need_minimal_exp` | `im_item_extend.need_minimal_exp` | EXP 管理判断 |
+| `new_exp_date` | `wh_inbound_batch.qc_ExpiredDate`（当前批次） | EXP 比较 |
+| `fc_max_exp_date` | `load_fc_exp_summary` | 与新货 EXP 比较 |
+
+### 10.5 Loader 函数
+
+```python
+# data/loader.py — load_pending_putaway()
+def load_pending_putaway() -> tuple[pd.DataFrame, str | None]:
+    """
+    Query NJ warehouse for items received but not yet put away.
+    Returns items currently sitting in RECG (location_type=1) staging locations.
+    
+    Returns (DataFrame, None) on success:
+        Columns: item_number, location_no, waiting_putaway_qty, last_update
+    Returns (None, error_str) on failure.
+    """
+```
+
+---
