@@ -429,13 +429,12 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     # ── Row limit ─────────────────────────────────────────────
     _total_rows = len(tdf)
-    _row_presets = [50, 100, 200, 500]
-    _preset_labels = [str(n) for n in _row_presets if n <= _total_rows] + ["All"]
     _rl1, _rl2 = st.columns([2, 1])
     with _rl1:
-        _preset = st.select_slider(
-            "Rows to show", options=_preset_labels,
-            value=_preset_labels[0] if len(_preset_labels) > 1 else "All",
+        _preset = st.selectbox(
+            "Rows to show",
+            options=["All", 500, 200, 100, 50],
+            index=0,
             key=f"rowlimit_preset_{key}",
         )
     with _rl2:
