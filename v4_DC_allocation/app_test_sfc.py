@@ -37,7 +37,7 @@ _PGCOMP_DIR.mkdir(exist_ok=True)
 (_PGCOMP_DIR / "index.html").write_text("""
 <html><head><style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:inherit}
-body{display:flex;align-items:center;justify-content:flex-end;height:36px;overflow:hidden}
+body{display:flex;align-items:center;justify-content:flex-end;height:36px;overflow:hidden;background:transparent}
 #pg{display:flex;gap:4px;align-items:center}
 button{border:1px solid #ddd;border-radius:5px;background:#fff;color:#333;
   font-size:0.8rem;height:28px;min-width:28px;padding:0 9px;cursor:pointer;
@@ -45,40 +45,52 @@ button{border:1px solid #ddd;border-radius:5px;background:#fff;color:#333;
 button:hover{border-color:#4e8df5;color:#4e8df5}
 button.active{background:#4e8df5;border-color:#4e8df5;color:#fff;font-weight:600;cursor:default}
 button:disabled{color:#ccc;border-color:#eee;cursor:default}
-.dot{color:#bbb;font-size:0.85rem;padding:0 2px}
+.dot{color:#bbb;font-size:0.85rem;padding:0 2px;line-height:28px}
 </style></head>
 <body><div id="pg"></div>
 <script>
-const params=new URLSearchParams(window.location.search);
-const page=parseInt(params.get('page')||'1');
-const total=parseInt(params.get('total')||'1');
-function send(p){Streamlit.setComponentValue(p);}
-function shown(){
-  let s=new Set([1,total]);
-  for(let i=Math.max(1,page-2);i<=Math.min(total,page+2);i++) s.add(i);
-  return [...s].sort((a,b)=>a-b);
-}
-function render(){
-  const pg=document.getElementById('pg');
-  const pages=shown();
-  let html='';
-  html+=`<button ${page<=1?'disabled':''} onclick="send(${page-1})">&#8249;</button>`;
-  let prev=null;
-  for(const p of pages){
-    if(prev&&p-prev>1) html+=`<span class="dot">…</span>`;
-    if(p===page) html+=`<button class="active">${p}</button>`;
-    else html+=`<button onclick="send(${p})">${p}</button>`;
-    prev=p;
+// Wait for Streamlit to inject itself, then render
+function init() {
+  const params = new URLSearchParams(window.location.search);
+  const page  = parseInt(params.get('page')  || '1');
+  const total = parseInt(params.get('total') || '1');
+
+  function send(p) {
+    // Streamlit v1 component protocol
+    const msg = {type: 'streamlit:setComponentValue', value: p};
+    window.parent.postMessage(msg, '*');
   }
-  html+=`<button ${page>=total?'disabled':''} onclick="send(${page+1})">&#8250;</button>`;
-  pg.innerHTML=html;
+
+  function shown() {
+    const s = new Set([1, total]);
+    for (let i = Math.max(1, page-2); i <= Math.min(total, page+2); i++) s.add(i);
+    return [...s].sort((a, b) => a - b);
+  }
+
+  const pages = shown();
+  const pg = document.getElementById('pg');
+  let html = '';
+  html += `<button ${page<=1?'disabled':''} onclick="send(${page-1})">&#8249;</button>`;
+  let prev = null;
+  for (const p of pages) {
+    if (prev && p - prev > 1) html += `<span class="dot">…</span>`;
+    if (p === page) html += `<button class="active">${p}</button>`;
+    else           html += `<button onclick="send(${p})">${p}</button>`;
+    prev = p;
+  }
+  html += `<button ${page>=total?'disabled':''} onclick="send(${page+1})">&#8250;</button>`;
+  pg.innerHTML = html;
+
+  // Tell Streamlit the frame height
+  window.parent.postMessage({type: 'streamlit:setFrameHeight', height: 36}, '*');
 }
-window.addEventListener('load',()=>{
-  if(window.Streamlit){render();Streamlit.setFrameHeight(36);}
-  else{document.addEventListener('streamlit:render',()=>{render();Streamlit.setFrameHeight(36);});}
+
+// Streamlit sends 'streamlit:render' when ready, also try on load
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'streamlit:render') { init(); }
 });
+window.addEventListener('load', function() { setTimeout(init, 50); });
 </script>
-<script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
 </body></html>
 """)
 _paginator = _cv1.declare_component("paginator", path=str(_PGCOMP_DIR))
