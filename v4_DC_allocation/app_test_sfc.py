@@ -494,8 +494,8 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            # CSS to style ALL secondary buttons in this app as compact page pills
             st.markdown("""<style>
+            /* Make all secondary buttons in pagination look like pills */
             button[data-testid="baseButton-secondary"] {
                 border: 1px solid #ddd !important;
                 border-radius: 5px !important;
@@ -506,15 +506,27 @@ def _render_table(tdf, key, label, extra_caption=""):
                 min-height: 28px !important;
                 padding: 0 9px !important;
                 line-height: 1 !important;
+                margin: 0 !important;
             }
             button[data-testid="baseButton-secondary"]:hover {
                 border-color: #4e8df5 !important;
                 color: #4e8df5 !important;
-                background: #fff !important;
             }
             button[data-testid="baseButton-secondary"]:disabled {
                 color: #ccc !important;
                 border-color: #eee !important;
+            }
+            /* Make the columns inside pagination row behave as flex items */
+            div[data-testid="stHorizontalBlock"]:has(button[data-testid="baseButton-secondary"]) {
+                gap: 3px !important;
+                flex-wrap: nowrap !important;
+                justify-content: flex-end !important;
+            }
+            div[data-testid="stHorizontalBlock"]:has(button[data-testid="baseButton-secondary"]) > div[data-testid="column"] {
+                flex: 0 0 auto !important;
+                width: auto !important;
+                min-width: 0 !important;
+                padding: 0 !important;
             }
             </style>""", unsafe_allow_html=True)
 
@@ -527,17 +539,13 @@ def _render_table(tdf, key, label, extra_caption=""):
                     _nav_items.append(("page", _val, _val == _page))
             _nav_items.append(("next", _page + 1, _page == _total_pages))
 
-            _widths = []
-            for _kind, _, _ in _nav_items:
-                _widths.append(0.22 if _kind == "ellipsis" else 0.3)
-            _cols = st.columns(_widths)
-
+            _cols = st.columns(len(_nav_items))
             for _i, (_kind, _val, _state) in enumerate(_nav_items):
                 with _cols[_i]:
                     if _kind == "ellipsis":
-                        st.markdown('<p style="color:#bbb;font-size:0.8rem;text-align:center;margin:0;padding-top:5px">…</p>', unsafe_allow_html=True)
+                        st.markdown('<p style="color:#bbb;font-size:0.8rem;text-align:center;margin:0;padding-top:5px;min-width:16px">…</p>', unsafe_allow_html=True)
                     elif _kind == "page" and _state:
-                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:5px;text-align:center;font-size:0.8rem;font-weight:600;height:28px;line-height:28px;padding:0 9px">{_val}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:5px;text-align:center;font-size:0.8rem;font-weight:600;height:28px;line-height:28px;padding:0 9px;white-space:nowrap">{_val}</div>', unsafe_allow_html=True)
                     elif _kind == "prev":
                         if st.button("‹", key=f"prev_{key}", disabled=_state):
                             st.session_state[f"page_{key}"] = _val; st.rerun()
