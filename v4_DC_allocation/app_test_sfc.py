@@ -494,44 +494,50 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            import streamlit.components.v1 as _cv1
-
-            def _pg_btn_html(pn, current):
-                if pn == current:
-                    return f'<button disabled style="background:#4e8df5;color:#fff;border:1px solid #4e8df5;border-radius:6px;padding:0 10px;font-size:0.82rem;font-weight:600;height:30px;min-width:30px;cursor:default">{pn}</button>'
-                return f'<button onclick="sendPage({pn})" style="background:#fff;color:#333;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:0.82rem;height:30px;min-width:30px;cursor:pointer">{pn}</button>'
-
-            def _arrow_html(symbol, pn, disabled):
-                if disabled:
-                    return f'<button disabled style="background:#fff;color:#ccc;border:1px solid #eee;border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:default">{symbol}</button>'
-                return f'<button onclick="sendPage({pn})" style="background:#fff;color:#555;border:1px solid #ddd;border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:pointer">{symbol}</button>'
-
-            _parts = [_arrow_html("‹", _page - 1, _page == 1)]
+            # All page nav in ONE column — prevents spreading
+            # Build prev, page numbers, next as a flex row via CSS
+            _nav_items = []
+            _nav_items.append(("prev", _page - 1, _page == 1))
             for _kind, _val in _page_items:
                 if _kind == "ellipsis":
-                    _parts.append('<span style="color:#bbb;padding:0 4px;font-size:0.85rem;line-height:30px">…</span>')
+                    _nav_items.append(("ellipsis", "…", False))
                 else:
-                    _parts.append(_pg_btn_html(_val, _page))
-            _parts.append(_arrow_html("›", _page + 1, _page == _total_pages))
+                    _nav_items.append(("page", _val, _val == _page))
+            _nav_items.append(("next", _page + 1, _page == _total_pages))
 
-            _pg_html = f"""
-            <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end">
-                {"".join(_parts)}
-            </div>
-            <script>
-            function sendPage(p) {{
-                window.parent.postMessage({{
-                    type: "streamlit:setComponentValue",
-                    value: p,
-                    dataType: "int"
-                }}, "*");
-            }}
-            </script>
-            """
-            _clicked_page = _cv1.html(_pg_html, height=40, scrolling=False)
-            if _clicked_page and isinstance(_clicked_page, int) and 1 <= _clicked_page <= _total_pages:
-                st.session_state[f"page_{key}"] = _clicked_page
-                st.rerun()
+            # Render all as st.button in a single flex container
+            # Inject CSS to make ALL buttons in this section small
+            _uid = f"nav_{key}"
+            st.markdown(f"""
+            <style>
+            .{_uid} {{display:flex;align-items:center;gap:4px;justify-content:flex-end;flex-wrap:nowrap}}
+            .{_uid} > div[data-testid="column"] {{flex:0 0 auto!important;width:auto!important;min-width:0!important}}
+            .{_uid} button {{padding:0 9px!important;height:28px!important;min-height:28px!important;font-size:0.8rem!important;line-height:1!important;border-radius:5px!important}}
+            </style>
+            <div class="{_uid}" id="{_uid}">
+            """, unsafe_allow_html=True)
+
+            _btn_cols = st.columns([0.3] * len(_nav_items))
+            for _i, (_kind, _val, _state) in enumerate(_nav_items):
+                with _btn_cols[_i]:
+                    if _kind == "ellipsis":
+                        st.markdown('<span style="color:#bbb;font-size:0.8rem;padding:0 2px">…</span>', unsafe_allow_html=True)
+                    elif _kind == "page" and _state:  # current page
+                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:5px;text-align:center;font-size:0.8rem;font-weight:600;height:28px;line-height:28px;padding:0 9px;white-space:nowrap">{_val}</div>', unsafe_allow_html=True)
+                    elif _kind == "prev":
+                        if st.button("‹", key=f"prev_{key}", disabled=_state):
+                            st.session_state[f"page_{key}"] = _val
+                            st.rerun()
+                    elif _kind == "next":
+                        if st.button("›", key=f"next_{key}", disabled=_state):
+                            st.session_state[f"page_{key}"] = _val
+                            st.rerun()
+                    else:
+                        if st.button(str(_val), key=f"pg_{key}_{_val}"):
+                            st.session_state[f"page_{key}"] = _val
+                            st.rerun()
+
+            st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Remove old hidden button block (no longer needed) ──────
     if _total_pages > 1:
