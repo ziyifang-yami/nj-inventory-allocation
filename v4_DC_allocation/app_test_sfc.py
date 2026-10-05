@@ -412,7 +412,7 @@ def _render_table(tdf, key, label, extra_caption=""):
     # ── Filters — single row ──────────────────────────────────
     _fc1, _fc2, _fc3 = st.columns([1.2, 1, 1])
     with _fc1:
-        _search = st.text_input("🔍 Item", key=f"search_{key}", placeholder="Item number")
+        _search = st.text_input("🔍 SKU", key=f"search_{key}", placeholder="Item number")
     with _fc2:
         _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
         _seg_filter = st.selectbox("Segment", _segs, key=f"seg_{key}")
@@ -467,78 +467,53 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── Footer: rows/page (tight) left · page nav (compact HTML) right ──
-    # Use a unique CSS scope key to avoid cross-tab button interference
-    _css_key = f"pgfooter_{key}"
-    st.markdown(f"""<style>
-    #{_css_key} button {{
-        padding: 1px 7px !important;
-        min-height: 24px !important;
-        height: 24px !important;
-        font-size: 0.75rem !important;
-        line-height: 1.2 !important;
-        border-radius: 4px !important;
-    }}
-    #{_css_key} .stSelectbox > div > div {{
-        min-height: 28px !important;
-        padding: 2px 8px !important;
-        font-size: 0.8rem !important;
-    }}
-    </style>""", unsafe_allow_html=True)
+    # ── Footer: rows/page left · compact page nav right ───────
+    _shown = sorted(set(
+        [1, _total_pages] +
+        list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
+    )) if _total_pages > 1 else []
 
-    with st.container():
-        st.markdown(f'<div id="{_css_key}">', unsafe_allow_html=True)
+    _page_items = []
+    _prev = None
+    for _pn in _shown:
+        if _prev and _pn - _prev > 1:
+            _page_items.append(("ellipsis", "…"))
+        _page_items.append(("current" if _pn == _page else "btn", _pn))
+        _prev = _pn
 
-        _shown = sorted(set(
-            [1, _total_pages] +
-            list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
-        )) if _total_pages > 1 else []
+    _nav_w = [0.28] * (len(_page_items) + 2)
+    _all_cols = st.columns([0.5, 0.8, 1.5] + _nav_w)
 
-        _page_items = []
-        _prev = None
-        for _pn in _shown:
-            if _prev and _pn - _prev > 1:
-                _page_items.append(("ellipsis", "…"))
-            _page_items.append(("current" if _pn == _page else "btn", _pn))
-            _prev = _pn
+    with _all_cols[0]:
+        st.markdown('<p style="font-size:0.9rem;color:#444;margin:0;padding-top:8px;white-space:nowrap">rows/page</p>', unsafe_allow_html=True)
+    with _all_cols[1]:
+        st.selectbox(
+            "rpp", options=[50, 100, 200, 500, "All"],
+            index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
+        )
 
-        # cols: label(narrow) + selectbox(narrow) + spacer + nav
-        _nav_w = [0.28] * (len(_page_items) + 2)
-        _all_cols = st.columns([0.5, 0.8, 1.5] + _nav_w)
-
-        with _all_cols[0]:
-            st.markdown('<p style="font-size:0.78rem;color:#777;margin:0;padding-top:8px;white-space:nowrap">rows/page</p>', unsafe_allow_html=True)
-        with _all_cols[1]:
-            st.selectbox(
-                "rpp", options=[50, 100, 200, 500, "All"],
-                index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
-            )
-
-        if _total_pages > 1:
-            _offset = 3
+    if _total_pages > 1:
+        _offset = 3
+        with _all_cols[_offset]:
+            if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                st.session_state[f"page_{key}"] = _page - 1
+                st.rerun()
+        _offset += 1
+        for _kind, _val in _page_items:
             with _all_cols[_offset]:
-                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
-                    st.session_state[f"page_{key}"] = _page - 1
-                    st.rerun()
+                if _kind == "ellipsis":
+                    st.markdown('<p style="font-size:0.75rem;color:#bbb;text-align:center;margin:0;padding-top:6px">…</p>', unsafe_allow_html=True)
+                elif _kind == "current":
+                    st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:4px;text-align:center;font-size:0.75rem;font-weight:600;padding:3px 0;margin-top:3px">{_val}</div>', unsafe_allow_html=True)
+                else:
+                    if st.button(str(_val), key=f"pg_{key}_{_val}"):
+                        st.session_state[f"page_{key}"] = _val
+                        st.rerun()
             _offset += 1
-            for _kind, _val in _page_items:
-                with _all_cols[_offset]:
-                    if _kind == "ellipsis":
-                        st.markdown('<p style="font-size:0.75rem;color:#bbb;text-align:center;margin:0;padding-top:6px">…</p>', unsafe_allow_html=True)
-                    elif _kind == "current":
-                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:4px;text-align:center;font-size:0.75rem;font-weight:600;padding:3px 0;margin-top:3px">{_val}</div>', unsafe_allow_html=True)
-                    else:
-                        if st.button(str(_val), key=f"pg_{key}_{_val}"):
-                            st.session_state[f"page_{key}"] = _val
-                            st.rerun()
-                _offset += 1
-            with _all_cols[_offset]:
-                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                    st.session_state[f"page_{key}"] = _page + 1
-                    st.rerun()
-
-        st.markdown('</div>', unsafe_allow_html=True)
-
+        with _all_cols[_offset]:
+            if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                st.session_state[f"page_{key}"] = _page + 1
+                st.rerun()
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
     # T1 transfer limit controls
