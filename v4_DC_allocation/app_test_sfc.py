@@ -449,25 +449,26 @@ def _render_table(tdf, key, label, extra_caption=""):
     tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
 
     # ── Caption + Download on same line ───────────────────────
-    _cap_col, _dl_col = st.columns([3, 1])
+    _cap_col, _dl_col = st.columns([4, 1])
     with _cap_col:
         st.caption(caption)
     with _dl_col:
         st.download_button(
-            "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
+            "⬇️ CSV", tdf_show.to_csv(index=False).encode(),
             file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
             use_container_width=True,
         )
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── rows/page selector — bottom right under table ─────────
-    _, _rows_col = st.columns([3, 1])
+    # ── rows/page — label + selectbox on same row, bottom right ──
+    _, _lbl_col, _rows_col = st.columns([3, 0.6, 1])
+    with _lbl_col:
+        st.markdown("<div style='padding-top:8px;text-align:right;color:gray;font-size:0.85rem'>rows/page</div>", unsafe_allow_html=True)
     with _rows_col:
         st.selectbox(
             "rows/page", options=["All", 500, 200, 100, 50],
-            index=3,  # default 100
-            key=f"rowlimit_{key}", label_visibility="visible",
+            index=3, key=f"rowlimit_{key}", label_visibility="collapsed",
         )
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
