@@ -199,7 +199,6 @@ class CacheDB:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         with self._conn() as conn:
             self._atomic_replace(conn, "sales", df[_SALES_COLS])
-            self._touch(conn, "sales")
 
     def read_sales(self) -> pd.DataFrame:
         """Read all sales data from SQLite."""
@@ -270,7 +269,10 @@ class CacheDB:
             conn.executemany(
                 "INSERT OR REPLACE INTO fc_lots VALUES(?,?,?,?,?,?,?,?)", rows
             )
-            self._touch(conn, "fc_lots")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("fc_lots", datetime.now(UTC).isoformat()),
+            )
 
     def read_fc_lots(self, skus: list[str] | None = None) -> pd.DataFrame:
         with self._conn() as conn:
@@ -325,7 +327,10 @@ class CacheDB:
                 conn.execute("DROP TABLE IF EXISTS fc2sfc_staging")
             else:
                 conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
-            self._touch(conn, "fc2sfc_tasks")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("fc2sfc_tasks", datetime.now(UTC).isoformat()),
+            )
 
     def read_fc2sfc_task(self, list_id: str) -> pd.DataFrame:
         with self._conn() as conn:
@@ -365,7 +370,10 @@ class CacheDB:
             conn.executemany(
                 "INSERT OR REPLACE INTO sfc_lots VALUES(?,?,?,?,?,?,?,?)", rows
             )
-            self._touch(conn, "sfc_lots")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("sfc_lots", datetime.now(UTC).isoformat()),
+            )
 
     def read_sfc_lots(self, skus: list[str] | None = None) -> pd.DataFrame:
         with self._conn() as conn:
@@ -399,7 +407,10 @@ class CacheDB:
         with self._conn() as conn:
             conn.execute("DELETE FROM fc_exp")
             conn.executemany("INSERT OR REPLACE INTO fc_exp VALUES(?,?,?)", rows)
-            self._touch(conn, "fc_exp")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("fc_exp", datetime.now(UTC).isoformat()),
+            )
 
     def read_fc_exp(self, skus: list[str] | None = None) -> pd.DataFrame:
         with self._conn() as conn:
@@ -424,7 +435,10 @@ class CacheDB:
             conn.execute("DELETE FROM exp_flags")
             conn.executemany("INSERT OR REPLACE INTO exp_flags VALUES(?)",
                              [(i,) for i in items])
-            self._touch(conn, "exp_flags")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("exp_flags", datetime.now(UTC).isoformat()),
+            )
 
     def read_exp_flags(self) -> set[str]:
         with self._conn() as conn:
@@ -463,7 +477,10 @@ class CacheDB:
                 conn.execute(f"DELETE FROM task_list WHERE list_id IN ({ph})", list_ids)
                 conn.execute("INSERT INTO task_list SELECT * FROM task_list_staging")
                 conn.execute("DROP TABLE IF EXISTS task_list_staging")
-            self._touch(conn, "task_list")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("task_list", datetime.now(UTC).isoformat()),
+            )
 
     def read_task_list(self, list_id: str) -> pd.DataFrame:
         with self._conn() as conn:
