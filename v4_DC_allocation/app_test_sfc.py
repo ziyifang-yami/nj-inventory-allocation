@@ -391,9 +391,9 @@ def _nrows(k):
 
 t1, t2, t3, t4 = st.tabs([
     f"🚨 T1 — Emergency Transfer SFC→FC  ({_nrows('T1')} rows)",
-    f"📦 T2 — Off-Peak Replenishment  ({_nrows('T2')} rows)",
+    f"📦 T2 — Off-Peak Replenishment SFC→FC  ({_nrows('T2')} rows)",
     f"🔄 T3 — SFC Bin → SFC Stock  ({_nrows('T3')} rows)",
-    f"📅 T4 — Cross-Zone Date Switch  ({_nrows('T4')} rows)",
+    f"📅 T4 — Cross-Zone Date Switch SFC→FC  ({_nrows('T4')} rows)",
 ])
 
 # ── Shared display helper ─────────────────────────────────────
