@@ -531,29 +531,69 @@ def load_fc_lot_data(skus: list[str]):
 
 # ── SFC lot data: lot-level location data for SFC→FC engine ──────────────────
 
-def load_sfc_lot_data(skus: list[str]):
+@st.cache_data(ttl=1800, show_spinner=False)
+def _sfc_lot_disk_cache():
+    """
+    No-arg wrapper — reads SFC lot parquet if cache is valid.
+    No-argument means @st.cache_data key never changes, avoiding
+    the overhead of hashing a 5K+ item tuple on every call.
+    Returns (DataFrame, True) if hit, (None, False) if miss.
+    """
+    CACHE_FILE = Path("results/sfc_lot_cache.parquet")
+    CACHE_TS   = Path("results/sfc_lot_cache_ts.txt")
+    if CACHE_FILE.exists() and CACHE_TS.exists():
+        try:
+            from datetime import datetime
+            _UTC = ZoneInfo("UTC")
+            cached_ts = datetime.fromisoformat(CACHE_TS.read_text().strip())
+            if cached_ts.tzinfo is None:
+                cached_ts = cached_ts.replace(tzinfo=_UTC)
+            age_min = (datetime.now(_UTC) - cached_ts.astimezone(_UTC)).total_seconds() / 60
+            if age_min < 120:  # 2 hours TTL
+                return pd.read_parquet(CACHE_FILE), True
+        except Exception:
+            pass
+    return None, False
+
+
+@st.cache_data(ttl=1800, show_spinner=False)  # 30-minute memory cache
+def load_sfc_lot_data(skus_tuple: tuple):
     """
     Fetch SFC lot-level location data for the given SKU list.
-
-    Used by the SFC→FC engine (MIDDLE_Router, Location_Selector). Req 11.3.
-
-    Returns
-    -------
-    (DataFrame, None) on success:
-        Columns:
-          item_number, location_no, loc_type (Bin/Stock),
-          qty, exp_date (datetime), inv_age_days (int),
-          case_qty (int, parsed from pieces_per_pack),
-          need_minimal_exp (int)
-    (None, str) on failure.
-
-    Zone filter: LIKE 'S%' OR LIKE 'DC%'
+    Fast path: uses _sfc_lot_disk_cache() to avoid hashing large tuples.
     """
+    import hashlib
+    skus = list(skus_tuple)
     if not skus:
         return pd.DataFrame(
             columns=["item_number", "location_no", "loc_type", "qty",
                      "exp_date", "inv_age_days", "case_qty", "need_minimal_exp"]
         ), None
+
+    # Fast path: check disk cache via no-arg function (no tuple hashing overhead)
+    _cached_df, _hit = _sfc_lot_disk_cache()
+    if _hit and _cached_df is not None:
+        return _cached_df, None
+
+    # ── Disk cache check (30 min) ─────────────────────────────
+    CACHE_FILE = Path("results/sfc_lot_cache.parquet")
+    CACHE_TS   = Path("results/sfc_lot_cache_ts.txt")
+    _CACHE_MAX_AGE_MIN = 120  # 2 hours — gives buffer for cron refresh cycle
+
+    if CACHE_FILE.exists() and CACHE_TS.exists():
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            _UTC = ZoneInfo("UTC")
+            cached_ts = datetime.fromisoformat(CACHE_TS.read_text().strip())
+            if cached_ts.tzinfo is None:
+                cached_ts = cached_ts.replace(tzinfo=_UTC)
+            age_min = (datetime.now(_UTC) - cached_ts.astimezone(_UTC)).total_seconds() / 60
+            if age_min < _CACHE_MAX_AGE_MIN:
+                df = pd.read_parquet(CACHE_FILE)
+                return df, None
+        except Exception:
+            pass  # corrupt cache → fall through to re-query
 
     try:
         conn = _connect()
@@ -568,12 +608,12 @@ def load_sfc_lot_data(skus: list[str]):
                 MAX(CASE WHEN ib.qc_ExpiredDate > 0
                          THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate))
                     END)                                               AS exp_date,
-                CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
+                MAX(CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
                     CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
                          THEN NULLIF(ib.in_dtm, 0)
                          ELSE NULLIF(lm.receive_time, 0)
                     END
-                ))) AS SIGNED)                                         AS inv_age_days,
+                ))) AS SIGNED))                                        AS inv_age_days,
                 CASE WHEN wis.spec IS NULL OR wis.spec = '' THEN 1
                      ELSE CAST(wis.spec AS UNSIGNED)
                 END                                                    AS case_qty,
@@ -596,8 +636,7 @@ def load_sfc_lot_data(skus: list[str]):
               AND wsl.location_type IN (3, 4)
               AND (li.location_no LIKE 'S%%' OR li.location_no LIKE 'DC%%')
               AND li.item_number IN ({ph})
-            GROUP BY li.item_number, li.location_no, wsl.location_type,
-                     lm.lot_id, lm.receive_time, wis.spec
+            GROUP BY li.item_number, li.location_no, wsl.location_type, wis.spec
             HAVING SUM(li.quantity) > 0
         """
 
@@ -621,6 +660,17 @@ def load_sfc_lot_data(skus: list[str]):
         df["inv_age_days"]     = pd.to_numeric(df["inv_age_days"], errors="coerce").fillna(0).astype(int)
         df["need_minimal_exp"] = pd.to_numeric(df["need_minimal_exp"], errors="coerce").fillna(0).astype(int)
         df["case_qty"]         = pd.to_numeric(df["case_qty"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+
+        # ── Write disk cache ──────────────────────────────────
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(CACHE_FILE, index=False)
+            CACHE_TS.write_text(datetime.now(ZoneInfo("UTC")).isoformat())
+        except Exception:
+            pass  # non-fatal
+
         return df, None
 
     except Exception as exc:
@@ -728,18 +778,11 @@ def _parse_case_qty(raw) -> int:
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_fc_exp_summary(skus_tuple: tuple):
     """
-    For each SKU, return the MAX and MIN exp_date across all FC lots.
+    For each SKU in skus_tuple, return MAX and MIN fc exp_date across all FC lots.
 
-    Used by:
-    - Putaway engine: new_exp < fc_max_exp_date → go to FC (FIFO)
-    - SFC→FC routing: sfc_lot_exp < fc_min_exp_date → EXP trigger
-
-    Accepts a TUPLE for @st.cache_data hashability.
-
-    Returns
-    -------
-    DataFrame with columns: item_number, fc_max_exp_date, fc_min_exp_date
-    Empty DataFrame on error.
+    Optimization: if skus_tuple is empty, returns empty DataFrame.
+    Caller should pre-filter to only EXP-trigger SKUs (need_minimal_exp=1)
+    to avoid querying all 14K+ SKUs.
     """
     skus = list(skus_tuple)
     if not skus:
@@ -789,3 +832,189 @@ def load_fc_exp_summary(skus_tuple: tuple):
 
     except Exception:
         return pd.DataFrame(columns=["item_number", "fc_max_exp_date", "fc_min_exp_date"])
+
+# ── FC exp summary (fast): single query, no IN clause ─────────────────────────
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_fc_exp_summary_all():
+    """
+    Load FC exp dates for ALL need_minimal_exp=1 SKUs in ONE query.
+    Uses subquery approach + disk cache. First run ~5-10s, subsequent <0.1s.
+    """
+    from pathlib import Path
+    CACHE_FILE = Path("results/fc_exp_all_cache.parquet")
+    CACHE_TS   = Path("results/fc_exp_all_cache_ts.txt")
+    _MAX_AGE_MIN = 30
+
+    if CACHE_FILE.exists() and CACHE_TS.exists():
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            cached_ts = datetime.fromisoformat(CACHE_TS.read_text().strip())
+            if cached_ts.tzinfo is None:
+                cached_ts = cached_ts.replace(tzinfo=ZoneInfo("America/New_York"))
+            age_min = (datetime.now(ZoneInfo("America/New_York")) - cached_ts).total_seconds() / 60
+            if age_min < _MAX_AGE_MIN:
+                df = pd.read_parquet(CACHE_FILE)
+                return df
+        except Exception:
+            pass
+
+    SQL = """
+        SELECT
+            li.item_number,
+            MAX(CASE WHEN ib.qc_ExpiredDate > 0
+                     THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate)) END) AS fc_max_exp_date,
+            MIN(CASE WHEN ib.qc_ExpiredDate > 0
+                     THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate)) END) AS fc_min_exp_date
+        FROM yamibuy_wh.wh_lot_inventory li
+        JOIN yamibuy_wh.wh_storage_location wsl
+            ON  wsl.location_no      = li.location_no
+            AND wsl.warehouse_number = li.warehouse_number
+        LEFT JOIN yamibuy_wh.wh_inbound_batch ib
+            ON  ib.lot_id = li.lot_id
+        JOIN yamibuy_im.im_item_extend iie
+            ON  iie.item_number = li.item_number
+            AND iie.need_minimal_exp = 1
+        WHERE li.warehouse_number = '002'
+          AND li.quantity > 0
+          AND wsl.location_type IN (3, 4)
+          AND li.location_no NOT LIKE 'S%%'
+          AND li.location_no NOT LIKE 'DC%%'
+        GROUP BY li.item_number
+        HAVING fc_max_exp_date IS NOT NULL
+    """
+    try:
+        conn = _connect()
+        with conn.cursor() as cur:
+            cur.execute(SQL)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        conn.close()
+
+        df = pd.DataFrame(rows, columns=cols)
+        df["item_number"]     = df["item_number"].astype(str)
+        df["fc_max_exp_date"] = pd.to_datetime(df["fc_max_exp_date"], errors="coerce")
+        df["fc_min_exp_date"] = pd.to_datetime(df["fc_min_exp_date"], errors="coerce")
+
+        # Write disk cache
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(CACHE_FILE, index=False)
+            CACHE_TS.write_text(datetime.now(ZoneInfo("America/New_York")).isoformat())
+        except Exception:
+            pass
+
+        return df
+
+    except Exception:
+        return pd.DataFrame(columns=["item_number", "fc_max_exp_date", "fc_min_exp_date"])
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_sfc_lot_data_all():
+    """
+    Fetch ALL SFC lot data in ONE query — no IN clause, no chunking.
+
+    Much faster than load_sfc_lot_data(skus_tuple) which fires multiple
+    chunked IN-clause queries. One full-table scan is cheaper than 29 round trips.
+
+    Results are disk-cached for 30 minutes. The app then filters to only
+    the relevant SKUs in Python (fast, no MySQL round trip).
+
+    Returns (DataFrame, None) or (None, error_str).
+    """
+    from pathlib import Path
+
+    CACHE_FILE = Path("results/sfc_lot_all_cache.parquet")
+    CACHE_TS   = Path("results/sfc_lot_all_cache_ts.txt")
+    _MAX_AGE_MIN = 30
+
+    # Disk cache check
+    if CACHE_FILE.exists() and CACHE_TS.exists():
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            cached_ts = datetime.fromisoformat(CACHE_TS.read_text().strip())
+            if cached_ts.tzinfo is None:
+                cached_ts = cached_ts.replace(tzinfo=ZoneInfo("America/New_York"))
+            age_min = (datetime.now(ZoneInfo("America/New_York")) - cached_ts).total_seconds() / 60
+            if age_min < _MAX_AGE_MIN:
+                df = pd.read_parquet(CACHE_FILE)
+                return df, None
+        except Exception:
+            pass
+
+    SQL = """
+        SELECT
+            li.item_number,
+            li.location_no,
+            CASE WHEN wsl.location_type = 4 THEN 'Bin'
+                 WHEN wsl.location_type = 3 THEN 'Stock' END     AS loc_type,
+            SUM(li.quantity)                                       AS qty,
+            MAX(CASE WHEN ib.qc_ExpiredDate > 0
+                     THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate))
+                END)                                               AS exp_date,
+            CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
+                CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
+                     THEN NULLIF(ib.in_dtm, 0)
+                     ELSE NULLIF(lm.receive_time, 0)
+                END
+            ))) AS SIGNED)                                         AS inv_age_days,
+            CASE WHEN wis.spec IS NULL OR wis.spec = '' THEN 1
+                 ELSE CAST(wis.spec AS UNSIGNED)
+            END                                                    AS case_qty,
+            MAX(IFNULL(iie.need_minimal_exp, 0))                   AS need_minimal_exp
+        FROM yamibuy_wh.wh_lot_inventory li
+        JOIN yamibuy_wh.wh_storage_location wsl
+            ON  wsl.location_no      = li.location_no
+            AND wsl.warehouse_number = li.warehouse_number
+            AND wsl.location_type   IN (3, 4)
+            AND (wsl.location_no LIKE 'S%' OR wsl.location_no LIKE 'DC%')
+        LEFT JOIN yamibuy_wh.wh_lot_master lm
+            ON  lm.lot_id = li.lot_id
+        LEFT JOIN yamibuy_wh.wh_inbound_batch ib
+            ON  ib.lot_id = li.lot_id
+        LEFT JOIN yamibuy_wh.wh_item_setting wis
+            ON  wis.item_number      = li.item_number
+            AND wis.warehouse_number = '002'
+        LEFT JOIN yamibuy_im.im_item_extend iie
+            ON  iie.item_number = li.item_number
+        WHERE li.warehouse_number = '002'
+          AND li.quantity > 0
+        GROUP BY li.item_number, li.location_no, wsl.location_type,
+                 lm.lot_id, lm.receive_time, wis.spec
+        HAVING SUM(li.quantity) > 0
+    """
+
+    try:
+        conn = _connect()
+        with conn.cursor() as cur:
+            cur.execute(SQL)
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        conn.close()
+
+        df = pd.DataFrame(rows, columns=cols)
+        df["item_number"]      = df["item_number"].astype(str)
+        df["qty"]              = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        df["exp_date"]         = pd.to_datetime(df["exp_date"], errors="coerce")
+        df["inv_age_days"]     = pd.to_numeric(df["inv_age_days"], errors="coerce").fillna(0).astype(int)
+        df["need_minimal_exp"] = pd.to_numeric(df["need_minimal_exp"], errors="coerce").fillna(0).astype(int)
+        df["case_qty"]         = pd.to_numeric(df["case_qty"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+
+        # Save to disk cache
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(CACHE_FILE, index=False)
+            CACHE_TS.write_text(datetime.now(ZoneInfo("America/New_York")).isoformat())
+        except Exception:
+            pass
+
+        return df, None
+
+    except Exception as exc:
+        return None, str(exc)

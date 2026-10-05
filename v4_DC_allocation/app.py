@@ -37,6 +37,7 @@ from data.loader import (
     load_sfc_lot_data,
     load_sku_loc_stats,
     load_fc_exp_summary,
+    load_fc_exp_summary_all,
 )
 from logic.classify import classify_df
 from logic.fc_to_sfc import (
@@ -53,6 +54,7 @@ from logic.sfc_to_fc import (
     build_middle_lists,
     select_middle_sfc_locations,
     build_sfc_to_fc_lists,
+    estimate_pending_counts,
 )
 from logic.putaway import decide_putaway, run_putaway
 from config import P
@@ -60,7 +62,7 @@ from config import P
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="NJ Inventory Allocation v4",
+    page_title="NJ Inventory Allocation",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -176,98 +178,125 @@ def calc_ideal(df_in, aod_top, ol_top, ol_tail,
                mid_evict=30, mid_target=28,
                min_loc_qty=5):
     """
-    动态计算理想状态 —— 基于当前 sidebar 阈值实时运算，不依赖静态 CSV。
-    TOP  : SFC > 0 → full SFC→FC transfer
-    TAIL : FC > 0 → FC_TO_DC 全清
-    MIDDLE: DC→FC (SFC Return) or FC→DC (Move Out)
+    Vectorized ideal-state calculation — replaces the row-by-row Python loop.
+    ~50x faster on 44K SKUs (avoids iterrows overhead).
     """
     import numpy as np
 
-    rows = []
-    for _, r in df_in.iterrows():
-        fc    = float(r["fc_qty"])
-        sfc   = float(r["sfc_qty"])
-        adl   = float(r.get("avg_daily_orders", 0) or 0)
-        vol   = float(r.get("unit_volume_cbi", 0) or float(r.get("unit_volume_cbm", 0) or 0))
-        seg   = str(r["seg"])
+    df = df_in.copy()
+    n  = len(df)
 
-        fc_d2s     = (fc / adl) if adl > 0 else float("nan")
-        target_qty = round(adl * mid_target, 0) if adl > 0 else 0.0
+    fc  = df["fc_qty"].to_numpy(dtype=float)
+    sfc = df["sfc_qty"].to_numpy(dtype=float)
+    adl = df["avg_daily_orders"].to_numpy(dtype=float)
 
-        action       = "KEEP"
-        transfer_qty = 0.0
-        fc_ideal     = fc
-        sfc_ideal    = sfc
-        priority     = 999.0
-        reason       = ""
+    # volume: prefer unit_volume_cbi, fall back to unit_volume_cbm
+    if "unit_volume_cbi" in df.columns:
+        vol = df["unit_volume_cbi"].fillna(0).to_numpy(dtype=float)
+        vol = np.where(vol > 0, vol, df.get("unit_volume_cbm", pd.Series(0, index=df.index)).fillna(0).to_numpy(dtype=float))
+    else:
+        vol = df.get("unit_volume_cbm", pd.Series(0, index=df.index)).fillna(0).to_numpy(dtype=float)
 
-        if seg == "TOP":
-            if sfc > 0:
-                xfer         = sfc
-                action       = "DC_TO_FC"
-                transfer_qty = round(xfer, 0)
-                fc_ideal     = fc + xfer
-                sfc_ideal    = 0.0
-                d2s_val      = fc_d2s if not pd.isna(fc_d2s) else 0.0
-                reason       = f"TOP full SFC→FC transfer (FC D2S={d2s_val:.1f})"
+    seg = df["seg"].to_numpy()
 
-        elif seg == "MIDDLE":
-            if adl > 0:
-                d2s = fc_d2s if not pd.isna(fc_d2s) else 0.0
-                if d2s <= mid_routine and sfc > 0:
-                    needed = max(0.0, target_qty - fc)
-                    if needed > 0:
-                        xfer         = min(needed, sfc)
-                        action       = "DC_TO_FC"
-                        transfer_qty = round(xfer, 0)
-                        fc_ideal     = fc + xfer
-                        sfc_ideal    = sfc - xfer
-                        batch_vol    = xfer * vol
-                        emerg        = d2s <= mid_emergency
-                        reason       = f"FC D2S={d2s:.1f} {'[EMERGENCY]' if emerg else '[ROUTINE]'}"
-                        priority     = d2s * 1e6 - batch_vol * 1e3 - adl
-                elif d2s > mid_evict:
-                    keep_qty = round(adl * mid_evict, 0)
-                    excess   = fc - keep_qty
-                    if excess > min_loc_qty:
-                        excess_vol   = excess * vol
-                        action       = "FC_TO_DC"
-                        transfer_qty = round(excess, 0)
-                        fc_ideal     = fc - excess
-                        sfc_ideal    = sfc + excess
-                        reason       = f"FC D2S={d2s:.1f} > {mid_evict}, excess={excess:.0f}"
-                        priority     = -excess_vol * 1e3 - excess
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fc_d2s = np.where(adl > 0, fc / adl, np.nan)
 
-        elif seg == "TAIL":
-            if fc > 0:
-                action       = "FC_TO_DC"
-                transfer_qty = fc
-                fc_ideal     = 0.0
-                sfc_ideal    = sfc + fc
-                reason       = "TAIL: clear FC"
-                priority     = 100.0
+    target_qty = np.where(adl > 0, np.round(adl * mid_target), 0.0)
 
-        rows.append({
-            "item_number":   str(r["item_number"]),
-            "seg":           seg,
-            "biz_type":      str(r.get("biz_type", "")),
-            "fc_qty":        fc,
-            "sfc_qty":       sfc,
-            "fc_d2s":        round(fc_d2s, 1) if not pd.isna(fc_d2s) else None,
-            "avg_daily":     round(adl, 2),
-            "unit_vol":      round(vol, 4),
-            "action":        action,
-            "transfer_qty":  transfer_qty,
-            "fc_ideal":      fc_ideal,
-            "sfc_ideal":     sfc_ideal,
-            "fc_vol_now":    round(fc      * vol, 0),
-            "sfc_vol_now":   round(sfc     * vol, 0),
-            "fc_vol_ideal":  round(fc_ideal  * vol, 0),
-            "sfc_vol_ideal": round(sfc_ideal * vol, 0),
-            "priority":      round(priority, 3),
-            "reason":        reason,
-        })
-    return pd.DataFrame(rows)
+    action        = np.full(n, "KEEP",  dtype=object)
+    transfer_qty  = np.zeros(n)
+    fc_ideal      = fc.copy()
+    sfc_ideal     = sfc.copy()
+    priority      = np.full(n, 999.0)
+    reason        = np.full(n, "",      dtype=object)
+
+    # ── TOP ──────────────────────────────────────────────────
+    m_top = (seg == "TOP") & (sfc > 0)
+    action[m_top]       = "DC_TO_FC"
+    transfer_qty[m_top] = np.round(sfc[m_top])
+    fc_ideal[m_top]     = fc[m_top] + sfc[m_top]
+    sfc_ideal[m_top]    = 0.0
+    d2s_top             = np.where(np.isnan(fc_d2s[m_top]), 0.0, fc_d2s[m_top])
+    reason[m_top]       = np.array([f"TOP full SFC→FC transfer (FC D2S={v:.1f})" for v in d2s_top])
+
+    # ── MIDDLE DC→FC ─────────────────────────────────────────
+    d2s_safe = np.where(np.isnan(fc_d2s), 999.0, fc_d2s)
+    needed   = np.maximum(0.0, target_qty - fc)
+    xfer_mid = np.minimum(needed, sfc)
+
+    m_mid_in = (
+        (seg == "MIDDLE") & (adl > 0) &
+        (d2s_safe <= mid_routine) & (sfc > 0) & (needed > 0)
+    )
+    action[m_mid_in]       = "DC_TO_FC"
+    transfer_qty[m_mid_in] = np.round(xfer_mid[m_mid_in])
+    fc_ideal[m_mid_in]     = fc[m_mid_in] + xfer_mid[m_mid_in]
+    sfc_ideal[m_mid_in]    = sfc[m_mid_in] - xfer_mid[m_mid_in]
+    batch_vol_mid          = xfer_mid * vol
+    emerg                  = d2s_safe <= mid_emergency
+    reason[m_mid_in]       = np.array([
+        f"FC D2S={d:.1f} {'[EMERGENCY]' if e else '[ROUTINE]'}"
+        for d, e in zip(d2s_safe[m_mid_in], emerg[m_mid_in])
+    ])
+    priority[m_mid_in] = (
+        d2s_safe[m_mid_in] * 1e6
+        - batch_vol_mid[m_mid_in] * 1e3
+        - adl[m_mid_in]
+    )
+
+    # ── MIDDLE FC→DC ─────────────────────────────────────────
+    keep_qty   = np.where(adl > 0, np.round(adl * mid_evict), fc)
+    excess     = fc - keep_qty
+    excess_vol = excess * vol
+
+    m_mid_out = (
+        (seg == "MIDDLE") & (adl > 0) &
+        (d2s_safe > mid_evict) & (excess > min_loc_qty) &
+        (action == "KEEP")
+    )
+    action[m_mid_out]       = "FC_TO_DC"
+    transfer_qty[m_mid_out] = np.round(excess[m_mid_out])
+    fc_ideal[m_mid_out]     = fc[m_mid_out] - excess[m_mid_out]
+    sfc_ideal[m_mid_out]    = sfc[m_mid_out] + excess[m_mid_out]
+    reason[m_mid_out]       = np.array([
+        f"FC D2S={d:.1f} > {mid_evict}, excess={e:.0f}"
+        for d, e in zip(d2s_safe[m_mid_out], excess[m_mid_out])
+    ])
+    priority[m_mid_out] = -excess_vol[m_mid_out] * 1e3 - excess[m_mid_out]
+
+    # ── TAIL ─────────────────────────────────────────────────
+    m_tail = (seg == "TAIL") & (fc > 0)
+    action[m_tail]       = "FC_TO_DC"
+    transfer_qty[m_tail] = fc[m_tail]
+    fc_ideal[m_tail]     = 0.0
+    sfc_ideal[m_tail]    = sfc[m_tail] + fc[m_tail]
+    reason[m_tail]       = "TAIL: clear FC"
+    priority[m_tail]     = 100.0
+
+    # ── Assemble ──────────────────────────────────────────────
+    fc_d2s_rounded = np.where(np.isnan(fc_d2s), None, np.round(fc_d2s, 1))
+
+    return pd.DataFrame({
+        "item_number":   df["item_number"].astype(str).values,
+        "seg":           seg,
+        "biz_type":      df["biz_type"].astype(str).values if "biz_type" in df.columns else "",
+        "fc_qty":        fc,
+        "sfc_qty":       sfc,
+        "fc_d2s":        fc_d2s_rounded,
+        "avg_daily":     np.round(adl, 2),
+        "unit_vol":      np.round(vol, 4),
+        "action":        action,
+        "transfer_qty":  transfer_qty,
+        "fc_ideal":      fc_ideal,
+        "sfc_ideal":     sfc_ideal,
+        "fc_vol_now":    np.round(fc       * vol),
+        "sfc_vol_now":   np.round(sfc      * vol),
+        "fc_vol_ideal":  np.round(fc_ideal * vol),
+        "sfc_vol_ideal": np.round(sfc_ideal * vol),
+        "priority":      np.round(priority, 3),
+        "reason":        reason,
+    })
 
 
 # ── Session state initialisation ─────────────────────────────────────────────
@@ -343,32 +372,16 @@ with st.sidebar:
     st.caption(f"Rolling 30 inv-days · wh=002 · 1P+FBY · {DATA_TS}")
 
 
-# ── Header ────────────────────────────────────────────────────────────────────
-_inv_badge = "🟢 Live" if INV_TS == "live" else f"🟡 {INV_TS}"
-st.markdown(
-    f"<span style='color:#999;font-size:.9rem'>"
-    f"In-stock SKUs: {len(df):,} &nbsp;|&nbsp; "
-    f"Sales: {DATA_TS} &nbsp;|&nbsp; "
-    f"Inventory: {_inv_badge}"
-    f"</span>",
-    unsafe_allow_html=True,
-)
-col_head, col_refresh = st.columns([8, 1])
-with col_refresh:
-    if st.button("🔄 Refresh", help="Re-query Athena and reload inventory"):
-        _do_refresh()
-        st.rerun()
-
-
 # ── Classify ─────────────────────────────────────────────────
-def classify(r):
-    if r.active_order_days >= aod_top and r.order_lines_30d >= ol_top:
-        return "TOP"
-    if r.order_lines_30d < ol_tail:
-        return "TAIL"
-    return "MIDDLE"
-
-df["seg"]      = df.apply(classify, axis=1)
+# Vectorized classify — avoid row-by-row apply (44K SKUs × Python call overhead)
+import numpy as _np
+_aod_arr = df["active_order_days"].to_numpy(dtype=float)
+_ol_arr  = df["order_lines_30d"].to_numpy(dtype=float)
+_seg_arr = _np.where(
+    (_aod_arr >= aod_top) & (_ol_arr >= ol_top), "TOP",
+    _np.where(_ol_arr < ol_tail, "TAIL", "MIDDLE")
+)
+df["seg"] = _seg_arr
 df["biz_type"] = df["item_number"].astype(str).str[0].map({"1": "自营", "5": "FBY"}).fillna("Other")
 
 # ── 只保留库内有库存的 SKU（fc_qty>0 或 sfc_qty>0）────────────
@@ -398,6 +411,7 @@ def stats(seg):
 T = stats("TOP"); M = stats("MIDDLE"); TL = stats("TAIL")
 
 # ── Header ────────────────────────────────────────────────────
+st.markdown("## NJ Inventory Allocation")
 _inv_status = '🟢 Live' if INV_TS == 'live' else '🟡 ' + INV_TS
 
 st.markdown(
@@ -1177,206 +1191,119 @@ with tab_fc2sfc:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 4 — SFC → FC Plan  (Req 14.1, 14.2, 14.3, 14.4)
+# TAB 4 — SFC → FC Plan
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — SFC → FC Plan  (reads from SQLite cache built by refresh_sfc_cache.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_sfc2fc:
-    st.markdown("### SFC → FC Transfer Plan")
+    from cache_db import CacheDB as _CacheDB
+    from logic.sfc_to_fc import build_sfc_to_fc_lists as _build_sfc2fc
 
-    cfg = dict(P)  # operational params from config.py
+    _DB_PATH  = "results/sfc_cache.db"
+    _db       = _CacheDB(_DB_PATH)
 
-    df_top    = df[df["seg"] == "TOP"].copy()
-    df_middle = df[df["seg"] == "MIDDLE"].copy()
-
-    # Load SFC lot data + FC exp summary for EXP routing
-    all_skus = df["item_number"].tolist()
-    df_sfc_lots, sfc_err = load_sfc_lot_data(all_skus)
-    df_fc_exp = load_fc_exp_summary(tuple(all_skus))
-
-    # Merge fc_min_exp_date into df_skus
-    df_for_routing = df.merge(
-        df_fc_exp[["item_number", "fc_min_exp_date", "fc_max_exp_date"]],
-        on="item_number", how="left"
-    )
-
-    if sfc_err:
-        st.warning(f"SFC lot data unavailable: {sfc_err}")
-        df_sfc_lots = pd.DataFrame()
-
-    # Build T1/T2/T3/T4 task lists
-    task_lists = build_sfc_to_fc_lists(
-        df_sfc_lots if df_sfc_lots is not None and not df_sfc_lots.empty else pd.DataFrame(),
-        df_for_routing,
-        cfg,
-    )
-
-    # ── Dashboard summary cards ───────────────────────────────────────────────
-    _T_META = {
-        "T1": {"label": "T1 紧急补货",   "color": "#e74c3c", "icon": "🚨",
-               "desc": "fc_d2s < 3  /  Zone Fallback"},
-        "T2": {"label": "T2 常规补货",   "color": "#5B8DEF", "icon": "📦",
-               "desc": "TOP routine  /  MIDDLE fc_d2s < 14"},
-        "T3": {"label": "T3 Bin→Stock",  "color": "#F0A500", "icon": "🔄",
-               "desc": "SFC Bin → SFC Stock 移位"},
-        "T4": {"label": "T4 DateSwitch", "color": "#8C8C8C", "icon": "📅",
-               "desc": "SFC Stock → FC  (保质期更差)"},
-    }
-
-    # Compute per-list metrics
-    def _list_metrics(tl: pd.DataFrame):
-        if tl is None or tl.empty:
-            return {"skus": 0, "locs": 0, "qty": 0, "rows": 0}
-        skus = tl["item_number"].nunique() if "item_number" in tl.columns else 0
-        qty  = int(tl["qty_to_transfer"].sum()) if "qty_to_transfer" in tl.columns else 0
-        return {"skus": skus, "locs": len(tl), "qty": qty, "rows": len(tl)}
-
-    metrics = {k: _list_metrics(task_lists.get(k)) for k in ["T1", "T2", "T3", "T4"]}
-    total_qty  = sum(m["qty"]  for m in metrics.values())
-    total_skus = sum(m["skus"] for m in metrics.values())
-
-    # Top-level totals
-    tot1, tot2, tot3 = st.columns(3)
-    tot1.metric("Total Transfer Qty",  f"{total_qty:,}")
-    tot2.metric("Total SKUs",          f"{total_skus:,}")
-    tot3.metric("Task Lists Active",
-                f"{sum(1 for m in metrics.values() if m['rows'] > 0)} / 4")
-
+    # ── Pending SKU counts (instant) ─────────────────────────────────────────
+    pending = estimate_pending_counts(df, dict(P))
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("🚨 T1 Pending", f"{pending['T1']['skus']:,} SKUs")
+    h2.metric("📦 T2 Pending", f"{pending['T2']['skus']:,} SKUs")
+    h3.metric("🔄 T3 Pending", f"{pending['T3']['skus']:,} SKUs")
+    h4.metric("📅 T4 Pending", f"{pending['T4']['skus']:,} SKUs")
     st.divider()
 
-    # Per-list cards
-    dc1, dc2, dc3, dc4 = st.columns(4)
-    for col, key in zip([dc1, dc2, dc3, dc4], ["T1", "T2", "T3", "T4"]):
-        m    = metrics[key]
-        meta = _T_META[key]
-        clr  = meta["color"]
-        has  = m["rows"] > 0
-        badge_bg  = clr + "22"
-        badge_txt = clr
-        with col:
-            st.markdown(f"""
-            <div style="border:2px solid {clr};border-radius:12px;padding:16px 18px;
-                        background:{'#fff' if has else '#fafafa'}">
-              <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-                <span style="font-size:1.3rem">{meta['icon']}</span>
-                <span style="font-size:1rem;font-weight:700;color:{clr}">{meta['label']}</span>
-              </div>
-              <div style="font-size:.78rem;color:#888;margin-bottom:12px">{meta['desc']}</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-                <div style="background:{badge_bg};border-radius:8px;padding:8px 10px">
-                  <div style="font-size:.68rem;color:#888;text-transform:uppercase;
-                              letter-spacing:.05em">SKUs</div>
-                  <div style="font-size:1.4rem;font-weight:800;color:{badge_txt if has else '#ccc'}">
-                    {m['skus']:,}</div>
-                </div>
-                <div style="background:{badge_bg};border-radius:8px;padding:8px 10px">
-                  <div style="font-size:.68rem;color:#888;text-transform:uppercase;
-                              letter-spacing:.05em">Locs</div>
-                  <div style="font-size:1.4rem;font-weight:800;color:{badge_txt if has else '#ccc'}">
-                    {m['locs']:,}</div>
-                </div>
-                <div style="background:{badge_bg};border-radius:8px;padding:8px 10px;
-                            grid-column:1/-1">
-                  <div style="font-size:.68rem;color:#888;text-transform:uppercase;
-                              letter-spacing:.05em">Transfer Qty</div>
-                  <div style="font-size:1.6rem;font-weight:800;color:{badge_txt if has else '#ccc'}">
-                    {m['qty']:,}</div>
-                </div>
-              </div>
-              {'<div style="margin-top:10px;font-size:.78rem;font-weight:600;color:#27ae60">✓ Has tasks</div>'
-               if has else
-               '<div style="margin-top:10px;font-size:.78rem;color:#ccc">— No tasks</div>'}
-            </div>""", unsafe_allow_html=True)
+    # ── Sub-tabs ──────────────────────────────────────────────────────────────
+    _t2 = _db.read_task_list("T2")
+    _t3 = _db.read_task_list("T3")
+    _t4 = _db.read_task_list("T4")
 
-    st.divider()
+    def _n(tdf): return len(tdf) if tdf is not None and not tdf.empty else 0
 
-    # ── Source type breakdown bar chart ───────────────────────────────────────
-    _all_tasks = [task_lists.get(k) for k in ["T1","T2","T3","T4"] if task_lists.get(k) is not None and not task_lists.get(k, pd.DataFrame()).empty]
-    if _all_tasks:
-        _combined = pd.concat(_all_tasks, ignore_index=True)
-        if "source_type" in _combined.columns and "qty_to_transfer" in _combined.columns:
-            _st_summary = (
-                _combined.groupby("source_type")["qty_to_transfer"]
-                .sum().reset_index()
-                .sort_values("qty_to_transfer", ascending=False)
-            )
-            _SOURCE_COLORS = {
-                "top_emergency":    "#e74c3c",
-                "mid_emergency":    "#e74c3c",
-                "mid_zone_fallback":"#e74c3c",
-                "top_routine":      "#5B8DEF",
-                "mid_routine":      "#5B8DEF",
-                "mid_bin_to_stock": "#F0A500",
-                "mid_stock_to_fc":  "#8C8C8C",
-                "top_stock_to_fc":  "#8C8C8C",
-            }
-            _bar_colors = [_SOURCE_COLORS.get(s, "#aaa") for s in _st_summary["source_type"]]
-            fig_st = go.Figure(go.Bar(
-                x=_st_summary["source_type"],
-                y=_st_summary["qty_to_transfer"],
-                marker_color=_bar_colors,
-                text=_st_summary["qty_to_transfer"].apply(lambda v: f"{int(v):,}"),
-                textposition="outside",
-            ))
-            fig_st.update_layout(
-                title="Transfer Qty by Source Type",
-                xaxis_title=None,
-                yaxis_title="Qty",
-                height=280,
-                margin=dict(t=40, b=20, l=0, r=0),
-                plot_bgcolor="white",
-                yaxis=dict(gridcolor="#f0f0f0"),
-            )
-            st.plotly_chart(fig_st, use_container_width=True)
-
-    st.divider()
-
-    # ── Detail tabs ───────────────────────────────────────────────────────────
-    sfc2fc_t1, sfc2fc_t2, sfc2fc_t3, sfc2fc_t4 = st.tabs([
-        f"🚨 T1 紧急  ({metrics['T1']['rows']} rows)",
-        f"📦 T2 常规  ({metrics['T2']['rows']} rows)",
-        f"🔄 T3 Bin→Stock  ({metrics['T3']['rows']} rows)",
-        f"📅 T4 DateSwitch  ({metrics['T4']['rows']} rows)",
+    _sfc_t1, _sfc_t2, _sfc_t3, _sfc_t4 = st.tabs([
+        f"🚨 T1 — Emergency Transfer SFC→FC",
+        f"📦 T2 — Off-Peak Replenishment  ({_n(_t2)} rows)",
+        f"🔄 T3 — SFC Bin → SFC Stock  ({_n(_t3)} rows)",
+        f"📅 T4 — Cross-Zone Date Switch  ({_n(_t4)} rows)",
     ])
 
-    def _render_task_table(df_task: pd.DataFrame, tab_label: str, fname: str):
-        if df_task is None or df_task.empty:
-            st.info(f"No {tab_label} tasks at current thresholds.")
-            return
-        display_cols = [c for c in [
-            "item_number", "segment", "source_type", "location_no", "loc_type",
-            "qty_to_transfer", "qty", "exp_date", "case_qty", "fc_d2s",
-            "avg_daily_orders", "rule",
-        ] if c in df_task.columns]
-        if not display_cols:
-            display_cols = list(df_task.columns)
-        st.caption(f"{len(df_task):,} rows · {df_task['item_number'].nunique() if 'item_number' in df_task.columns else '?'} SKUs")
-        st.dataframe(df_task[display_cols], use_container_width=True, height=400)
-        st.download_button(
-            f"⬇ Download {tab_label} CSV",
-            df_task[display_cols].to_csv(index=False).encode(),
-            file_name=fname,
-            mime="text/csv",
-            key=f"dl_{tab_label}",
-        )
+    _DCOLS = [
+        "segment","item_number","location_no","loc_type","qty_to_transfer",
+        "exp_date","case_qty","fc_d2s","avg_daily_orders","source_type",
+    ]
+    _RENAME = {"case_qty": "case_spec"}
 
-    with sfc2fc_t1:
-        st.markdown("#### T1 — 紧急补货")
-        st.caption("TOP fc_d2s < 3 · MIDDLE fc_d2s < 3 · MIDDLE SFC Bin EXP更差 (Zone Fallback)")
-        _render_task_table(task_lists.get("T1"), "T1", "sfc_to_fc_t1.csv")
+    def _render_sfc(tab, tdf, key, label, extra=""):
+        with tab:
+            if tdf is None or tdf.empty:
+                st.info(f"No {label} tasks.")
+                return
+            cols = [c for c in _DCOLS if c in tdf.columns]
+            tdf = tdf[cols].copy()
+            for c in ["qty_to_transfer","case_qty","fc_d2s","avg_daily_orders"]:
+                if c in tdf.columns:
+                    tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
+            # Filters
+            _fc1, _fc2 = st.columns([2,1])
+            with _fc1:
+                _s = st.text_input("🔍 Item Number", key=f"s_{key}", placeholder="e.g. 100123")
+            with _fc2:
+                _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
+                _sf = st.selectbox("Segment", _segs, key=f"sf_{key}")
+            if _s:
+                tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
+            if _sf != "All" and "segment" in tdf.columns:
+                tdf = tdf[tdf["segment"] == _sf]
+            sort_c = [c for c in ["avg_daily_orders","fc_d2s"] if c in tdf.columns]
+            if sort_c:
+                tdf = tdf.sort_values(sort_c, ascending=[False,True], na_position="last")
+            tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
+            tdf = tdf.rename(columns=_RENAME)
+            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
+            st.caption(f"{len(tdf):,} rows · {n_skus} SKUs" + (f" · {extra}" if extra else ""))
+            st.dataframe(tdf, use_container_width=True, height=500)
+            st.download_button(f"⬇ {label} CSV", tdf.to_csv(index=False).encode(),
+                               file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv",
+                               key=f"dl_main_{key}")
 
-    with sfc2fc_t2:
-        st.markdown("#### T2 — 常规补货")
-        st.caption("TOP fc_d2s ≥ 3 · MIDDLE SFC Stock fc_d2s < 14 · EXP OK")
-        _render_task_table(task_lists.get("T2"), "T2", "sfc_to_fc_t2.csv")
+    # ── T1 tab: slider + cache ────────────────────────────────────────────────
+    with _sfc_t1:
+        with st.expander("⚙️ T1 Transfer Limit", expanded=False):
+            st.caption("Transfer enough SFC to bring FC up to this many days of stock.")
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.slider("TOP — Target D2S", 1, 30,
+                          st.session_state.get("main_t1_top", 7), key="main_t1_top")
+            with _c2:
+                st.slider("MIDDLE — Target D2S", 1, 30,
+                          st.session_state.get("main_t1_mid", 7), key="main_t1_mid")
 
-    with sfc2fc_t3:
-        st.markdown("#### T3 — SFC Bin → SFC Stock")
-        st.caption("MIDDLE SFC Bin位移位（无EXP触发，或SFC比FC更新鲜）")
-        _render_task_table(task_lists.get("T3"), "T3", "sfc_to_fc_t3.csv")
+        _t1_top = st.session_state.get("main_t1_top", 7)
+        _t1_mid = st.session_state.get("main_t1_mid", 7)
 
-    with sfc2fc_t4:
-        st.markdown("#### T4 — DateSwitch (SFC Stock → FC)")
-        st.caption("EXP trigger，SFC保质期更差 → 搬回FC先出")
-        _render_task_table(task_lists.get("T4"), "T4", "sfc_to_fc_t4.csv")
+        if _t1_top == 7 and _t1_mid == 7:
+            _tdf_t1 = _db.read_task_list("T1_7d")
+            if _tdf_t1 is None or _tdf_t1.empty:
+                # fallback: build live
+                _cfg1 = dict(P); _cfg1["t1_top_target_d2s"]=7; _cfg1["t1_mid_target_d2s"]=7
+                _df_r = df[df["item_number"].isin(df[df["sfc_qty"]>0]["item_number"])].copy()
+                _df_fc_exp = _db.read_fc_exp()
+                if not _df_fc_exp.empty:
+                    _df_r = _df_r.merge(_df_fc_exp[["item_number","fc_min_exp_date","fc_max_exp_date"]], on="item_number", how="left")
+                _df_lots = _db.read_sfc_lots()
+                _tdf_t1 = _build_sfc2fc(_df_lots, _df_r, _cfg1, target_lists=["T1"]).get("T1", pd.DataFrame())
+            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1", extra="TOP=7d · MID=7d (cached)")
+        else:
+            _cfg1 = dict(P); _cfg1["t1_top_target_d2s"]=_t1_top; _cfg1["t1_mid_target_d2s"]=_t1_mid
+            _df_r = df[df["item_number"].isin(df[df["sfc_qty"]>0]["item_number"])].copy()
+            _df_fc_exp = _db.read_fc_exp()
+            if not _df_fc_exp.empty:
+                _df_r = _df_r.merge(_df_fc_exp[["item_number","fc_min_exp_date","fc_max_exp_date"]], on="item_number", how="left")
+            _df_lots = _db.read_sfc_lots()
+            _tdf_t1 = _build_sfc2fc(_df_lots, _df_r, _cfg1, target_lists=["T1"]).get("T1", pd.DataFrame())
+            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1", extra=f"TOP={_t1_top}d · MID={_t1_mid}d (live)")
+
+    _render_sfc(_sfc_t2, _t2, "T2", "T2")
+    _render_sfc(_sfc_t3, _t3, "T3", "T3")
+    _render_sfc(_sfc_t4, _t4, "T4", "T4")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1397,8 +1324,7 @@ with tab_putaway:
 
     # Build per-SKU fc_max_exp_date from the already-loaded fc_exp summary
     if "df_fc_exp" not in dir():
-        _all_skus = df["item_number"].tolist()
-        df_fc_exp = load_fc_exp_summary(tuple(_all_skus))
+        df_fc_exp = pd.DataFrame(columns=["item_number", "fc_min_exp_date", "fc_max_exp_date"])
 
     # Build inventory reference: item_number, sfc_qty, fc_max_exp_date
     df_inv_ref = df[["item_number", "sfc_qty"]].copy()
