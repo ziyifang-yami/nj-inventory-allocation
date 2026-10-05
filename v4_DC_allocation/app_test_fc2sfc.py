@@ -145,15 +145,6 @@ cols_t = st.columns(len(_timings) + 1)
 for i, (label, t) in enumerate(_timings.items()):
     cols_t[i].metric(label, f"{t:.2f}s")
 cols_t[-1].metric("**Total**", f"{total:.2f}s")
-st.divider()
-
-# ── Summary metrics ───────────────────────────────────────────────────────────
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("📤 MIDDLE Evict SKUs",  f"{len(df_mid_trigger):,}")
-m2.metric("🗑️ TAIL Clear SKUs",   f"{len(df_tail_trigger):,}")
-m3.metric("📦 MIDDLE Evict Rows",  f"{len(df_mid_locs):,}")
-m4.metric("📦 TAIL Clear Rows",    f"{len(df_tail_locs):,}")
-st.divider()
 
 # ── Display columns — same format as SFC→FC ───────────────────────────────────
 _DISPLAY_COLS = [
@@ -167,37 +158,55 @@ def _render_tab(tdf, key, label):
         st.info(f"No {label} tasks. Data refreshes every 30 min.")
         return
 
-    # Merge segment + fc_d2s + avg_daily_orders from df if not already in tdf
+    # Derive segment from trigger_type (don't merge from df — avoids classification drift)
     if "segment" not in tdf.columns or tdf["segment"].isna().all():
-        _meta = df[["item_number","seg","fc_d2s","avg_daily_orders"]].rename(columns={"seg":"segment"})
-        tdf = tdf.drop(columns=["segment","fc_d2s","avg_daily_orders"], errors="ignore")
+        if "trigger_type" in tdf.columns:
+            tdf["segment"] = tdf["trigger_type"].map({
+                "MIDDLE_EVICT": "MIDDLE",
+                "TAIL_CLEAR":   "TAIL",
+            }).fillna("")
+        elif key == "middle_evict":
+            tdf["segment"] = "MIDDLE"
+        else:
+            tdf["segment"] = "TAIL"
+
+    # Backfill fc_d2s + avg_daily_orders from df if missing
+    _missing_d2s = tdf["fc_d2s"].isna().all() if "fc_d2s" in tdf.columns else True
+    if _missing_d2s:
+        _meta = df[["item_number","fc_d2s","avg_daily_orders"]].drop_duplicates("item_number")
+        tdf = tdf.drop(columns=["fc_d2s","avg_daily_orders"], errors="ignore")
         tdf = tdf.merge(_meta, on="item_number", how="left")
 
-    cols = [c for c in _DISPLAY_COLS if c in tdf.columns]
-    tdf  = tdf[cols].copy()
-
     # Numeric cast
-    for c in ["qty_to_transfer","qty","fc_d2s","avg_daily_orders"]:
+    for c in ["qty_to_transfer","qty","fc_d2s","avg_daily_orders","excess_qty","keep_qty"]:
         if c in tdf.columns:
             tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
+    # Restrict to display columns
+    cols = [c for c in _DISPLAY_COLS if c in tdf.columns]
+    tdf  = tdf[cols].copy()
+
     # Filters
-    _fc1, _fc2 = st.columns([2, 1])
+    _fc1, _fc2, _fc3 = st.columns([2, 1, 1])
     with _fc1:
         _s = st.text_input("🔍 Item Number", key=f"s_{key}", placeholder="e.g. 100123")
     with _fc2:
         _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
         _sf = st.selectbox("Segment", _segs, key=f"sf_{key}")
+    with _fc3:
+        _locs = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
+        _lf = st.selectbox("Loc Type", _locs, key=f"lf_{key}")
 
     if _s:
         tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
     if _sf != "All" and "segment" in tdf.columns:
         tdf = tdf[tdf["segment"] == _sf]
+    if _lf != "All" and "loc_type" in tdf.columns:
+        tdf = tdf[tdf["loc_type"] == _lf]
 
-    # Sort: avg_daily_orders DESC → fc_d2s DESC (most oversupplied first)
-    sort_c = [c for c in ["avg_daily_orders","fc_d2s"] if c in tdf.columns]
-    if sort_c:
-        tdf = tdf.sort_values(sort_c, ascending=[False, False], na_position="last")
+    # Default sort: location_no ASC
+    if "location_no" in tdf.columns:
+        tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
     tdf = tdf.reset_index(drop=True)
     tdf.index = tdf.index + 1
     tdf = tdf.rename(columns=_COL_RENAME)
@@ -210,17 +219,17 @@ def _render_tab(tdf, key, label):
         file_name=f"fc_to_sfc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}"
     )
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_mid, tab_tail = st.tabs([
-    f"📤 MIDDLE Evict — FC→SFC  ({len(df_mid_locs):,} rows)",
+# ── Tabs — TAIL first (clear work), then MIDDLE (evict) ──────────────────────
+tab_tail, tab_mid = st.tabs([
     f"🗑️ TAIL Clear — FC→SFC  ({len(df_tail_locs):,} rows)",
+    f"📤 MIDDLE Evict — FC→SFC  ({len(df_mid_locs):,} rows)",
 ])
+
+with tab_tail:
+    st.caption("TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.")
+    _render_tab(df_tail_locs, "tail_clear", "TAIL Clear")
 
 with tab_mid:
     st.caption("SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
                "Single-location SKUs are not transferred (Keep In FC rule).")
     _render_tab(df_mid_locs, "middle_evict", "MIDDLE Evict")
-
-with tab_tail:
-    st.caption("TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.")
-    _render_tab(df_tail_locs, "tail_clear", "TAIL Clear")

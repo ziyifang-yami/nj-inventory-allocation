@@ -357,7 +357,6 @@ cols_t = st.columns(len(_timings) + 1)
 for i, (label, t) in enumerate(_timings.items()):
     cols_t[i].metric(label, f"{t:.2f}s")
 cols_t[-1].metric("**Total**", f"{total:.2f}s")
-st.divider()
 
 # ── All 4 lists ───────────────────────────────────────────────
 _DISPLAY_COLS = [
@@ -394,22 +393,31 @@ def _render_table(tdf, key, label, extra_caption=""):
             tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
     # ── Filters ──────────────────────────────────────────────
-    _fc1, _fc2 = st.columns([2, 1])
+    _fc1, _fc2, _fc3 = st.columns([2, 1, 1])
     with _fc1:
         _search = st.text_input("🔍 Item Number", key=f"search_{key}", placeholder="e.g. 100123")
     with _fc2:
         _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
         _seg_filter = st.selectbox("Segment", _segs, key=f"seg_{key}")
+    with _fc3:
+        _loctypes = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
+        _loc_filter = st.selectbox("Loc Type", _loctypes, key=f"loc_{key}")
 
     if _search:
         tdf = tdf[tdf["item_number"].astype(str).str.contains(_search.strip(), case=False, na=False)]
     if _seg_filter != "All" and "segment" in tdf.columns:
         tdf = tdf[tdf["segment"] == _seg_filter]
+    if _loc_filter != "All" and "loc_type" in tdf.columns:
+        tdf = tdf[tdf["loc_type"] == _loc_filter]
 
-    # ── Sort ─────────────────────────────────────────────────
-    sort_cols = [c for c in ["avg_daily_orders","fc_d2s"] if c in tdf.columns]
-    if sort_cols:
-        tdf = tdf.sort_values(sort_cols, ascending=[False, True], na_position="last")
+    # ── Sort: TOP first then MIDDLE, within each segment by location_no ASC ──
+    if "segment" in tdf.columns and "location_no" in tdf.columns:
+        tdf["_seg_order"] = tdf["segment"].map({"TOP": 0, "MIDDLE": 1}).fillna(2)
+        tdf = tdf.sort_values(["_seg_order", "location_no"], ascending=[True, True], na_position="last")
+        tdf = tdf.drop(columns=["_seg_order"])
+    elif "location_no" in tdf.columns:
+        tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
+
     tdf = tdf.reset_index(drop=True)
     tdf.index = tdf.index + 1
     tdf = tdf.rename(columns=_COL_RENAME)
