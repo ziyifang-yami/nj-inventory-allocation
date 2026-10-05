@@ -1006,7 +1006,7 @@ def load_sfc_lot_data_all():
 
 # ── Pending putaway: items received but not yet put away ──────────────────────
 
-@st.cache_data(ttl=300, show_spinner=False)  # 5-minute cache — changes as staff work
+@st.cache_data(ttl=1800, show_spinner=False)  # 30-min cache — same as cron cycle
 def load_pending_putaway():
     """
     Query NJ warehouse for items received but not yet put away.
@@ -1014,22 +1014,21 @@ def load_pending_putaway():
     Items sitting in RECG (location_type=1) staging locations are received
     goods waiting to be moved to their final Stock/Bin location.
 
-    Data source: wh_inventory_transaction JOIN wh_storage_location
-    Filter: warehouse_number='002', location_type=1, quantity>0
-
-    Verified 2026-10-05:
-    - 1,000 RECG locations (RECG0001~RECG1000)
-    - location_type=1 ↔ RECG prefix: 100% correspondence
-    - Typical: 50-150 SKUs / 2,000-5,000 units pending at any time
+    Two-query approach to avoid slow full-table scan on wh_inventory_transaction_log:
+      Q1: Fast — get all RECG items from wh_inventory_transaction (indexed)
+      Q2: Fast — get PO references from wh_inventory_transaction_log
+          filtered by the specific item_numbers found in Q1 (~50-150 items)
 
     Returns
     -------
     (DataFrame, None) on success:
-        Columns: item_number, location_no, waiting_putaway_qty, last_update
+        Columns: item_number, location_no, waiting_putaway_qty, po_reference, last_update
     (None, str) on failure.
     """
     try:
         conn = _connect()
+
+        # ── Q1: Get all items currently in RECG staging (fast, indexed) ──────
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
@@ -1045,21 +1044,52 @@ def load_pending_putaway():
                   AND it.quantity > 0
                   AND sl.location_type = 1
                 GROUP BY it.item_number, it.location_no
+                HAVING SUM(it.quantity) > 0
                 ORDER BY waiting_putaway_qty DESC
             """)
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
-        conn.close()
 
         if not rows:
+            conn.close()
             return pd.DataFrame(
-                columns=["item_number", "location_no", "waiting_putaway_qty", "last_update"]
+                columns=["item_number", "location_no", "waiting_putaway_qty", "po_reference", "last_update"]
             ), None
 
         df = pd.DataFrame(rows, columns=cols)
-        df["item_number"]          = df["item_number"].astype(str)
-        df["waiting_putaway_qty"]  = pd.to_numeric(df["waiting_putaway_qty"], errors="coerce").fillna(0).astype(int)
-        df["last_update"]          = pd.to_datetime(df["last_update"], errors="coerce")
+        df["item_number"]         = df["item_number"].astype(str)
+        df["waiting_putaway_qty"] = pd.to_numeric(df["waiting_putaway_qty"], errors="coerce").fillna(0).astype(int)
+        df["last_update"]         = pd.to_datetime(df["last_update"], errors="coerce")
+
+        # ── Q2: Get PO references only for the ~50-150 items found (fast) ────
+        item_list = df["item_number"].unique().tolist()
+        ph = ",".join(["%s"] * len(item_list))
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT
+                        item_number,
+                        GROUP_CONCAT(DISTINCT reference_id
+                            ORDER BY reference_id SEPARATOR ', ') AS po_reference
+                    FROM yamibuy_wh.wh_inventory_transaction_log
+                    WHERE warehouse_number = '002'
+                      AND item_number IN ({ph})
+                      AND reference_type IN (
+                          'PO System(Sellable)',
+                          'Seller shipment System(Sellable)'
+                      )
+                    GROUP BY item_number
+                """, item_list)
+                po_cols = [d[0] for d in cur.description]
+                po_rows = cur.fetchall()
+            df_po = pd.DataFrame(po_rows, columns=po_cols)
+            df_po["item_number"] = df_po["item_number"].astype(str)
+            df = df.merge(df_po, on="item_number", how="left")
+        except Exception:
+            # PO reference is nice-to-have; don't fail the whole tab
+            df["po_reference"] = None
+
+        conn.close()
         return df, None
 
     except Exception as exc:

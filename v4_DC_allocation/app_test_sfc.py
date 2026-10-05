@@ -164,13 +164,7 @@ _OVERDUE = {
 }
 _overdue_tables = [t for t, ttl in _OVERDUE.items() if DB_CACHE.age_minutes(t) > ttl]
 if _overdue_tables:
-    import subprocess, sys as _sys
-    _refresh_proc = subprocess.Popen(
-        [_sys.executable, "refresh_sfc_cache.py"],
-        cwd=os.path.dirname(os.path.abspath(__file__)),
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    st.info(f"⏳ Background refresh triggered for: {', '.join(_overdue_tables)}. Data shown is from last run. Reload in ~2 min for fresh data.")
+    st.info(f"⏳ Data overdue: {', '.join(_overdue_tables)}. Cron will refresh within 30 min. Use sidebar to refresh manually.")
 
 with _timed("Sales"):
     df_sales = DB_CACHE.read_sales()

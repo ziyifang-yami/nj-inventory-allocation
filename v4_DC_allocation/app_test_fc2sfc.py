@@ -80,10 +80,7 @@ with st.sidebar:
 
 # ── Auto-refresh if overdue ───────────────────────────────────────────────────
 if DB_CACHE.age_minutes("fc2sfc_tasks") > 35:
-    import subprocess, sys as _sys
-    subprocess.Popen([_sys.executable, "refresh_sfc_cache.py"],
-                     cwd=_HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    st.info("⏳ Background refresh triggered. Showing last cached data. Reload in ~2 min.")
+    st.info("⏳ FC→SFC data overdue. Cron refreshes every 30min. Use sidebar button to refresh manually.")
 
 # ── Timing helper ─────────────────────────────────────────────────────────────
 _timings = {}
@@ -226,10 +223,27 @@ tab_tail, tab_mid = st.tabs([
 ])
 
 with tab_tail:
-    st.caption("TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.")
+    _n_tail_total = len(df_tail_trigger) if not df_tail_trigger.empty else 0
+    _n_tail_cap   = df_tail_locs["item_number"].nunique() if not df_tail_locs.empty else 0
+    if _n_tail_total > _n_tail_cap:
+        st.caption(
+            f"TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.  "
+            f"**Showing top {_n_tail_cap:,} of {_n_tail_total:,} total SKUs** (sorted by avg daily orders ↑ — lowest velocity first)."
+        )
+    else:
+        st.caption("TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.")
     _render_tab(df_tail_locs, "tail_clear", "TAIL Clear")
 
 with tab_mid:
-    st.caption("SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
-               "Single-location SKUs are not transferred (Keep In FC rule).")
+    _n_mid_total = len(df_mid_trigger) if not df_mid_trigger.empty else 0
+    _n_mid_cap   = df_mid_locs["item_number"].nunique() if not df_mid_locs.empty else 0
+    if _n_mid_total > _n_mid_cap:
+        st.caption(
+            f"SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
+            f"Single-location SKUs are not transferred (Keep In FC rule).  "
+            f"**Showing top {_n_mid_cap:,} of {_n_mid_total:,} total SKUs** (sorted by avg daily orders ↑ — lowest velocity first)."
+        )
+    else:
+        st.caption("SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
+                   "Single-location SKUs are not transferred (Keep In FC rule).")
     _render_tab(df_mid_locs, "middle_evict", "MIDDLE Evict")

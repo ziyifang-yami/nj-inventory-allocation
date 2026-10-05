@@ -82,6 +82,15 @@ CREATE TABLE IF NOT EXISTS fc_lots (
     PRIMARY KEY (item_number, location_no)
 );
 
+CREATE TABLE IF NOT EXISTS pending_putaway (
+    item_number         TEXT NOT NULL,
+    location_no         TEXT,
+    waiting_putaway_qty INTEGER,
+    po_reference        TEXT,
+    last_update         TEXT,
+    PRIMARY KEY (item_number)
+);
+
 CREATE TABLE IF NOT EXISTS fc2sfc_tasks (
     list_id          TEXT NOT NULL,
     item_number      TEXT,
@@ -158,7 +167,18 @@ class CacheDB:
         except Exception:
             return 9999.0
 
-    def _touch(self, conn, table: str):
+    def _atomic_replace(self, conn, table: str, df: pd.DataFrame):
+        """
+        Atomically replace table content: write to staging, then swap.
+        Readers never see empty data — they see old data until new is ready.
+        """
+        staging = f"{table}_staging"
+        # Write to staging table
+        df.to_sql(staging, conn, if_exists="replace", index=False)
+        # Atomic swap inside the same connection/transaction
+        conn.execute(f"DELETE FROM {table}")
+        conn.execute(f"INSERT INTO {table} SELECT * FROM {staging}")
+        conn.execute(f"DROP TABLE IF EXISTS {staging}")
         conn.execute(
             "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
             (table, datetime.now(UTC).isoformat()),
@@ -178,8 +198,7 @@ class CacheDB:
             elif col != "item_number":
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         with self._conn() as conn:
-            conn.execute("DELETE FROM sales")
-            df[_SALES_COLS].to_sql("sales", conn, if_exists="append", index=False)
+            self._atomic_replace(conn, "sales", df[_SALES_COLS])
             self._touch(conn, "sales")
 
     def read_sales(self) -> pd.DataFrame:
@@ -198,6 +217,42 @@ class CacheDB:
         for c in cols:
             if c != "item_number":
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        return df
+
+    # ── Pending putaway ───────────────────────────────────────────────────────
+
+    def write_pending_putaway(self, df: pd.DataFrame):
+        with self._conn() as conn:
+            conn.execute("DELETE FROM pending_putaway")
+            if df is not None and not df.empty:
+                df = df.copy()
+                df["item_number"] = df["item_number"].astype(str)
+                for col in ["item_number","location_no","waiting_putaway_qty","po_reference","last_update"]:
+                    if col not in df.columns:
+                        df[col] = None
+                if "last_update" in df.columns:
+                    df["last_update"] = df["last_update"].astype(str).replace("NaT","")
+                rows = df[["item_number","location_no","waiting_putaway_qty","po_reference","last_update"]].values.tolist()
+                conn.executemany("INSERT OR REPLACE INTO pending_putaway VALUES(?,?,?,?,?)", rows)
+            # Always write meta so age is real (0 rows = genuinely empty, not "never run")
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("pending_putaway", datetime.now(UTC).isoformat()),
+            )
+
+    def read_pending_putaway(self) -> pd.DataFrame:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "SELECT item_number,location_no,waiting_putaway_qty,po_reference,last_update "
+                "FROM pending_putaway"
+            )
+            cols = [d[0] for d in cur.description]
+            rows = cur.fetchall()
+        if not rows:
+            return pd.DataFrame(columns=cols)
+        df = pd.DataFrame(rows, columns=cols)
+        df["waiting_putaway_qty"] = pd.to_numeric(df["waiting_putaway_qty"], errors="coerce").fillna(0).astype(int)
+        df["last_update"] = pd.to_datetime(df["last_update"].replace("",None), errors="coerce")
         return df
 
     # ── FC lots ───────────────────────────────────────────────────────────────
@@ -262,11 +317,14 @@ class CacheDB:
             rows.append(df[self._FC2SFC_COLS])
         with self._conn() as conn:
             ph = ",".join("?" * len(list_ids))
-            conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
             if rows:
-                pd.concat(rows, ignore_index=True).to_sql(
-                    "fc2sfc_tasks", conn, if_exists="append", index=False
-                )
+                new_data = pd.concat(rows, ignore_index=True)
+                new_data.to_sql("fc2sfc_staging", conn, if_exists="replace", index=False)
+                conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
+                conn.execute("INSERT INTO fc2sfc_tasks SELECT * FROM fc2sfc_staging")
+                conn.execute("DROP TABLE IF EXISTS fc2sfc_staging")
+            else:
+                conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
             self._touch(conn, "fc2sfc_tasks")
 
     def read_fc2sfc_task(self, list_id: str) -> pd.DataFrame:
@@ -397,13 +455,14 @@ class CacheDB:
                     df[col] = None
             rows.append(df[self._TASK_COLS])
         with self._conn() as conn:
-            # Only delete the specific list_ids being written (not the whole table)
-            ph = ",".join("?" * len(list_ids))
-            conn.execute(f"DELETE FROM task_list WHERE list_id IN ({ph})", list_ids)
             if rows:
-                pd.concat(rows, ignore_index=True).to_sql(
-                    "task_list", conn, if_exists="append", index=False
-                )
+                new_data = pd.concat(rows, ignore_index=True)
+                # Atomic: write to staging first, then swap (no empty window)
+                new_data.to_sql("task_list_staging", conn, if_exists="replace", index=False)
+                ph = ",".join("?" * len(list_ids))
+                conn.execute(f"DELETE FROM task_list WHERE list_id IN ({ph})", list_ids)
+                conn.execute("INSERT INTO task_list SELECT * FROM task_list_staging")
+                conn.execute("DROP TABLE IF EXISTS task_list_staging")
             self._touch(conn, "task_list")
 
     def read_task_list(self, list_id: str) -> pd.DataFrame:

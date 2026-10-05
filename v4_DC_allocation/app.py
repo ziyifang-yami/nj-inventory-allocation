@@ -308,68 +308,37 @@ if "ol_tail_val" not in st.session_state:
     st.session_state.ol_tail_val = P["ol_tail"]
 
 
-# ── Sidebar ────────────────────────────────────────────────────────────────────
+# ── Sidebar: Tier Thresholds ───────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## 🎛 Tier Thresholds")
-    if st.button("🔄 Refresh Data", key="refresh_btn", help="Re-query Athena and reload inventory"):
-        _do_refresh()
-        st.rerun()
     st.markdown("---")
-    # ── Session state init ──────────────────────────────────
-    if "aod_top_val" not in st.session_state: st.session_state.aod_top_val = 21
-    if "ol_top_val"  not in st.session_state: st.session_state.ol_top_val  = 100
-    if "ol_tail_val" not in st.session_state: st.session_state.ol_tail_val = 4
 
-    def sync_from_slider(val_key, sld_key):
-        st.session_state[val_key] = st.session_state[sld_key]
-    def sync_from_num(val_key, num_key):
-        st.session_state[val_key] = st.session_state[num_key]
+    if "aod_top_val" not in st.session_state: st.session_state.aod_top_val = P.get("aod_top", 21)
+    if "ol_top_val"  not in st.session_state: st.session_state.ol_top_val  = P.get("ol_top", 100)
+    if "ol_tail_val" not in st.session_state: st.session_state.ol_tail_val = P.get("ol_tail", 8)
 
-    # ── AOD ─────────────────────────────────────────────────
     st.markdown("**TOP** — FC Primary")
-    st.slider("Active Order Days ≥", 1, 30, key="aod_top_sld",
-              value=st.session_state.aod_top_val,
-              on_change=sync_from_slider, args=("aod_top_val", "aod_top_sld"))
-    st.number_input("", 1, 30, key="aod_top_num",
-                    value=st.session_state.aod_top_val, step=1,
-                    label_visibility="collapsed",
-                    on_change=sync_from_num, args=("aod_top_val", "aod_top_num"))
-    aod_top = st.session_state.aod_top_val
+    aod_top = st.slider("Active Order Days ≥", 1, 30,
+                        value=st.session_state.aod_top_val, key="aod_top_sld")
+    st.session_state.aod_top_val = aod_top
 
-    # ── OL TOP ───────────────────────────────────────────────
-    st.slider("30D Order Lines ≥", 1, 300, key="ol_top_sld",
-              value=st.session_state.ol_top_val, step=1,
-              on_change=sync_from_slider, args=("ol_top_val", "ol_top_sld"))
-    st.number_input(" ", 1, 500, key="ol_top_num",
-                    value=st.session_state.ol_top_val, step=1,
-                    label_visibility="collapsed",
-                    on_change=sync_from_num, args=("ol_top_val", "ol_top_num"))
-    ol_top = st.session_state.ol_top_val
+    ol_top = st.slider("30D Order Lines ≥", 1, 300,
+                       value=st.session_state.ol_top_val, step=1, key="ol_top_sld")
+    st.session_state.ol_top_val = ol_top
 
     st.markdown("---")
-    st.markdown("**TAIL** — DC Primary")
-
-    # ── OL TAIL ──────────────────────────────────────────────
-    st.slider("30D Order Lines <", 1, 50, key="ol_tail_sld",
-              value=st.session_state.ol_tail_val,
-              on_change=sync_from_slider, args=("ol_tail_val", "ol_tail_sld"))
-    st.number_input("  ", 1, 50, key="ol_tail_num",
-                    value=st.session_state.ol_tail_val, step=1,
-                    label_visibility="collapsed",
-                    on_change=sync_from_num, args=("ol_tail_val", "ol_tail_num"))
-    ol_tail = st.session_state.ol_tail_val
-
-    st.markdown("---")
-    st.markdown("**Targets**")
-    t_sku   = st.number_input("Target SKU %",   value=10.2, step=0.1, format="%.1f")
-    t_ol    = st.number_input("Target OL %",    value=70.2, step=0.1, format="%.1f")
-    t_units = st.number_input("Target Units %", value=77.7, step=0.1, format="%.1f")
-    t_cbi   = st.number_input("Target CBI %",   value=80.4, step=0.1, format="%.1f")
-
-    TARGETS = {"SKU %": t_sku, "OL %": t_ol, "Units %": t_units, "CBI %": t_cbi}
+    st.markdown("**TAIL** — SFC Primary")
+    ol_tail = st.slider("30D Order Lines <", 1, 50,
+                        value=st.session_state.ol_tail_val, key="ol_tail_sld")
+    st.session_state.ol_tail_val = ol_tail
 
     st.markdown("---")
     st.caption(f"Rolling 30 inv-days · wh=002 · 1P+FBY · {DATA_TS}")
+    st.markdown("---")
+    if st.button("🔄 Refresh Data", key="refresh_btn", use_container_width=True,
+                 help="Re-query Athena and reload inventory"):
+        _do_refresh()
+        st.rerun()
 
 
 # ── Classify ─────────────────────────────────────────────────
@@ -516,46 +485,8 @@ with tab_dash:
             unsafe_allow_html=True
         )
 
-    # RIGHT: Target comparison
+    # RIGHT: FC vs SFC inventory chart
     with right:
-        st.markdown("#### TOP Tier vs Target")
-
-        actuals = {
-            "SKU %":   T["psku"],
-            "OL %":    T["pol"],
-            "Units %": T["pu"],
-            "CBI %":   T["pc"],
-        }
-
-        for metric, target in TARGETS.items():
-            actual = actuals[metric]
-            pct    = min(actual / target, 1.0)
-            gap    = actual - target
-            color  = "#5B8DEF" if gap >= 0 else "#EF5B5B"
-            gap_bg = "#e8f0fe" if gap >= 0 else "#fde8e8"
-            gap_fg = "#1a56db" if gap >= 0 else "#c81e1e"
-            bar_w  = f"{pct*100:.0f}%"
-
-            st.markdown(f"""
-            <div class="target-row">
-              <div class="target-label">{metric}</div>
-              <div style="flex:1">
-                <div class="bar-wrap">
-                  <div class="bar-fill" style="width:{bar_w};background:{color}"></div>
-                </div>
-                <div style="font-size:.7rem;color:#999;margin-top:2px">
-                  {actual:.1f}% &nbsp;/&nbsp; target {target:.1f}%
-                </div>
-              </div>
-              <span class="gap-badge" style="background:{gap_bg};color:{gap_fg}">
-                {gap:+.1f}%
-              </span>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        # FC vs SFC stacked bar
         inv_df = pd.DataFrame([
             {"Tier": "TOP",    "FC": T["fc"],   "SFC": T["sfc"]},
             {"Tier": "MIDDLE", "FC": M["fc"],   "SFC": M["sfc"]},
@@ -569,7 +500,7 @@ with tab_dash:
                                  marker_color=[COLORS[t] for t in inv_df["Tier"]],
                                  opacity=.45))
         fig_inv.update_layout(
-            barmode="stack", height=220, margin=dict(t=30,b=0,l=0,r=0),
+            barmode="stack", height=280, margin=dict(t=30,b=0,l=0,r=0),
             title=dict(text="FC vs SFC Inventory", x=0, font_size=13),
             legend=dict(orientation="h", x=1, xanchor="right", y=1.1),
             yaxis=dict(tickformat=","), plot_bgcolor="white",
@@ -1102,20 +1033,14 @@ with tab_fc2sfc:
     _df_mid  = _db2.read_fc2sfc_task("MIDDLE_EVICT")
     _df_tail = _db2.read_fc2sfc_task("TAIL_CLEAR")
 
-    # Summary metrics
-    _t = compute_fc_to_sfc(df, dict(P))
-    _n_mid  = len(_t[_t["trigger"]=="MIDDLE_EVICT"]) if not _t.empty and "trigger" in _t.columns else 0
-    _n_tail = len(_t[_t["trigger"]=="TAIL_CLEAR"])   if not _t.empty and "trigger" in _t.columns else 0
-    _m1, _m2, _m3, _m4 = st.columns(4)
-    _m1.metric("📤 MIDDLE Evict SKUs", f"{_n_mid:,}")
-    _m2.metric("🗑️ TAIL Clear SKUs",  f"{_n_tail:,}")
-    _m3.metric("📦 MIDDLE Evict Rows", f"{len(_df_mid):,}")
-    _m4.metric("📦 TAIL Clear Rows",   f"{len(_df_tail):,}")
-    st.divider()
+    def _nskus2(tdf): return tdf["item_number"].nunique() if tdf is not None and not tdf.empty and "item_number" in tdf.columns else 0
+    _c1, _c2 = st.columns(2)
+    _c1.metric("🗑️ TAIL Clear", f"{_nskus2(_df_tail):,} SKUs")
+    _c2.metric("📤 MIDDLE Evict", f"{_nskus2(_df_mid):,} SKUs")
 
-    _fc2sfc_mid_tab, _fc2sfc_tail_tab = st.tabs([
-        f"📤 MIDDLE Evict — FC→SFC  ({len(_df_mid):,} rows)",
+    _fc2sfc_tail_tab, _fc2sfc_mid_tab = st.tabs([
         f"🗑️ TAIL Clear — FC→SFC  ({len(_df_tail):,} rows)",
+        f"📤 MIDDLE Evict — FC→SFC  ({len(_df_mid):,} rows)",
     ])
 
     _FC_COLS = ["item_number","location_no","loc_type","qty_to_transfer","qty",
@@ -1146,17 +1071,15 @@ with tab_fc2sfc:
             if sort_c:
                 tdf = tdf.sort_values(sort_c, ascending=[False,False], na_position="last")
             tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
-            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-            st.caption(f"{len(tdf):,} rows · {n_skus} SKUs")
             st.dataframe(tdf, use_container_width=True, height=500)
             st.download_button(f"⬇ {key} CSV", tdf.to_csv(index=False).encode(),
                                file_name=f"fc_to_sfc_{key.lower()}.csv", mime="text/csv",
                                key=f"dl_fc2_{key}")
 
-    _render_fc2sfc(_fc2sfc_mid_tab,  _df_mid,  "middle_evict",
-                   "SKUs where FC has too much stock (D2S > 30). Transfer excess back to SFC, keep 30-day supply in FC.")
     _render_fc2sfc(_fc2sfc_tail_tab, _df_tail, "tail_clear",
                    "TAIL SKUs with FC stock. Full clear — move everything from FC to SFC.")
+    _render_fc2sfc(_fc2sfc_mid_tab,  _df_mid,  "middle_evict",
+                   "SKUs where FC has too much stock (D2S > 30). Transfer excess back to SFC, keep 30-day supply in FC.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1171,27 +1094,29 @@ with tab_sfc2fc:
     _DB_PATH  = "results/sfc_cache.db"
     _db       = _CacheDB(_DB_PATH)
 
-    # ── Pending SKU counts (instant) ─────────────────────────────────────────
-    pending = estimate_pending_counts(df, dict(P))
-    h1, h2, h3, h4 = st.columns(4)
-    h1.metric("🚨 T1 Pending", f"{pending['T1']['skus']:,} SKUs")
-    h2.metric("📦 T2 Pending", f"{pending['T2']['skus']:,} SKUs")
-    h3.metric("🔄 T3 Pending", f"{pending['T3']['skus']:,} SKUs")
-    h4.metric("📅 T4 Pending", f"{pending['T4']['skus']:,} SKUs")
-    st.divider()
-
     # ── Sub-tabs ──────────────────────────────────────────────────────────────
     _t2 = _db.read_task_list("T2")
     _t3 = _db.read_task_list("T3")
     _t4 = _db.read_task_list("T4")
 
     def _n(tdf): return len(tdf) if tdf is not None and not tdf.empty else 0
+    def _nskus(tdf): return tdf["item_number"].nunique() if tdf is not None and not tdf.empty and "item_number" in tdf.columns else 0
+
+    # T1 uses 7d cached list
+    _t1_cached = _db.read_task_list("T1_7d")
+    _n_t1 = _n(_t1_cached) if not (_t1_cached is None or _t1_cached.empty) else _n(_db.read_task_list("T1"))
+
+    h1, h2, h3, h4 = st.columns(4)
+    h1.metric("🚨 T1 — Emergency", f"{_nskus(_t1_cached):,} SKUs")
+    h2.metric("📦 T2 — Replenishment", f"{_nskus(_t2):,} SKUs")
+    h3.metric("🔄 T3 — Bin→Stock", f"{_nskus(_t3):,} SKUs")
+    h4.metric("📅 T4 — Date Switch", f"{_nskus(_t4):,} SKUs")
 
     _sfc_t1, _sfc_t2, _sfc_t3, _sfc_t4 = st.tabs([
-        f"🚨 T1 — Emergency Transfer SFC→FC",
-        f"📦 T2 — Off-Peak Replenishment  ({_n(_t2)} rows)",
-        f"🔄 T3 — SFC Bin → SFC Stock  ({_n(_t3)} rows)",
-        f"📅 T4 — Cross-Zone Date Switch  ({_n(_t4)} rows)",
+        f"🚨 T1 — Emergency Transfer SFC→FC  ({_n_t1:,} rows)",
+        f"📦 T2 — Off-Peak Replenishment  ({_n(_t2):,} rows)",
+        f"🔄 T3 — SFC Bin → SFC Stock  ({_n(_t3):,} rows)",
+        f"📅 T4 — Cross-Zone Date Switch  ({_n(_t4):,} rows)",
     ])
 
     _DCOLS = [
@@ -1226,8 +1151,6 @@ with tab_sfc2fc:
                 tdf = tdf.sort_values(sort_c, ascending=[False,True], na_position="last")
             tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
             tdf = tdf.rename(columns=_RENAME)
-            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-            st.caption(f"{len(tdf):,} rows · {n_skus} SKUs" + (f" · {extra}" if extra else ""))
             st.dataframe(tdf, use_container_width=True, height=500)
             st.download_button(f"⬇ {label} CSV", tdf.to_csv(index=False).encode(),
                                file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv",
@@ -1276,83 +1199,128 @@ with tab_sfc2fc:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 5 — Putaway  (Req 14.1, 14.2, 14.3, 14.4, 8.1–8.9)
+# TAB 5 — Putaway  (live RECG pending putaway data)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_putaway:
+    from data.loader import load_pending_putaway
+    from cache_db import CacheDB as _CacheDB_pa
+    _db_pa = _CacheDB_pa("results/sfc_cache.db")
+
     st.markdown("### Putaway Decision Table")
-    st.caption(
-        "Assign each inbound receipt to FC or SFC. "
-        "Upload an inbound CSV or use the current inventory snapshot as a demo."
-    )
+    st.caption("Items currently in RECG receiving staging (location_type=1) — received but not yet put away.")
 
-    uploaded = st.file_uploader(
-        "Upload inbound CSV (columns: item_number, new_exp_date)",
-        type=["csv"],
-        key="putaway_upload",
-    )
+    # ── Load pending putaway from SQLite cache (refreshed every 5 min by cron) ─
+    df_pending = _db_pa.read_pending_putaway()
+    _pa_age = _db_pa.age_minutes("pending_putaway")
 
-    # Build per-SKU fc_max_exp_date from the already-loaded fc_exp summary
-    if "df_fc_exp" not in dir():
-        df_fc_exp = pd.DataFrame(columns=["item_number", "fc_min_exp_date", "fc_max_exp_date"])
+    if _pa_age > 9000:
+        st.info("⏳ Putaway data not yet loaded. Cron will populate within 30 min. Use sidebar to refresh manually.")
+        st.stop()
 
-    # Build inventory reference: item_number, sfc_qty, fc_max_exp_date
-    df_inv_ref = df[["item_number", "sfc_qty"]].copy()
-    if not df_fc_exp.empty:
-        df_inv_ref = df_inv_ref.merge(
-            df_fc_exp[["item_number", "fc_max_exp_date"]],
-            on="item_number", how="left"
-        )
+    if _pa_age > 35:
+        st.warning(f"⚠️ Putaway cache is {_pa_age:.0f} min old. Cron will refresh within 30 min.")
+
+    if df_pending.empty:
+        st.info("✅ No items currently pending putaway in RECG staging locations.")
     else:
-        df_inv_ref["fc_max_exp_date"] = None
+        # ── Build inventory reference with fc_min_exp_date ────────────────────
+        _fc_exp_pa = _db_pa.read_fc_exp()
 
-    if uploaded is not None:
-        df_inbound = pd.read_csv(uploaded)
-        df_inbound["item_number"] = df_inbound["item_number"].astype(str)
-        # Merge segment + fc_d2s from current df
-        df_inbound = df_inbound.merge(
-            df[["item_number", "seg", "fc_d2s", "fc_qty", "avg_daily_orders"]].drop_duplicates("item_number"),
-            on="item_number", how="left",
-        )
-        if "need_minimal_exp" not in df_inbound.columns:
-            df_inbound["need_minimal_exp"] = 0
-        if "new_exp_date" not in df_inbound.columns:
-            df_inbound["new_exp_date"] = None
-
-        df_putaway_out = run_putaway(df_inbound, df_inv_ref, cfg)
-        _show = [c for c in ["item_number", "seg", "fc_d2s", "putaway_zone",
-                              "putaway_rule", "putaway_reason"]
-                 if c in df_putaway_out.columns]
-        st.dataframe(df_putaway_out[_show], use_container_width=True)
-        st.download_button(
-            "⬇ Download Putaway CSV",
-            df_putaway_out[_show].to_csv(index=False).encode(),
-            file_name="putaway_decisions.csv",
-            mime="text/csv",
-        )
-
-    else:
-        st.info(
-            "No inbound file uploaded. "
-            "Upload a CSV with `item_number` and optionally `new_exp_date` "
-            "to generate putaway decisions."
-        )
-
-        # Demo: show putaway decisions for a 20-SKU sample
-        with st.expander("Preview — putaway decisions for a 20-SKU sample"):
-            df_sample = df.sample(min(20, len(df)), random_state=42).copy()
-            df_sample["new_exp_date"] = None
-            if "need_minimal_exp" not in df_sample.columns:
-                df_sample["need_minimal_exp"] = 0
-
-            # Merge fc_max_exp_date for the sample
-            df_sample = df_sample.merge(
-                df_inv_ref[["item_number", "fc_max_exp_date"]],
+        df_inv_ref_pa = df[["item_number","sfc_qty","fc_d2s"]].drop_duplicates("item_number").copy()
+        if not _fc_exp_pa.empty:
+            df_inv_ref_pa = df_inv_ref_pa.merge(
+                _fc_exp_pa[["item_number","fc_min_exp_date","fc_max_exp_date"]],
                 on="item_number", how="left"
             )
+        else:
+            df_inv_ref_pa["fc_min_exp_date"] = None
+            df_inv_ref_pa["fc_max_exp_date"] = None
 
-            results = df_sample.apply(lambda r: decide_putaway(r, cfg), axis=1, result_type="expand")
-            df_sample_out = pd.concat([
-                df_sample[["item_number", "seg", "fc_d2s", "sfc_qty"]],
-                results
-            ], axis=1)
-            st.dataframe(df_sample_out, use_container_width=True)
+        # ── Merge classification + inventory into pending ─────────────────────
+        df_pa = df_pending.copy()
+        df_pa["item_number"] = df_pa["item_number"].astype(str)
+
+        df_pa = df_pa.merge(
+            df[["item_number","seg","avg_daily_orders"]].drop_duplicates("item_number"),
+            on="item_number", how="left"
+        )
+        # need_minimal_exp from SQLite exp_flags cache
+        _exp_flags_pa = _db_pa.read_exp_flags()  # returns set of item_numbers
+        df_pa["need_minimal_exp"] = df_pa["item_number"].isin(_exp_flags_pa).astype(int)
+        df_pa = df_pa.merge(
+            df_inv_ref_pa[["item_number","sfc_qty","fc_d2s","fc_min_exp_date"]],
+            on="item_number", how="left"
+        )
+
+        # Get new_exp_date from wh_inbound_batch via RECG lots (use last_update as proxy for now)
+        # new_exp_date not available from wh_inventory_transaction — set None, triggers D2S path
+        df_pa["new_exp_date"] = None
+        df_pa["sfc_qty"] = df_pa["sfc_qty"].fillna(0)
+        df_pa["fc_d2s"]  = df_pa["fc_d2s"].fillna(0)
+        df_pa["need_minimal_exp"] = df_pa["need_minimal_exp"].fillna(0).astype(int)
+        df_pa["seg"] = df_pa["seg"].fillna("MIDDLE")  # default MIDDLE if unknown
+
+        # ── Apply putaway decision ─────────────────────────────────────────────
+        _decisions = df_pa.apply(lambda r: decide_putaway(r, dict(P)), axis=1, result_type="expand")
+        df_pa = pd.concat([df_pa, _decisions], axis=1)
+
+        # ── Summary metrics ───────────────────────────────────────────────────
+        _n_fc  = (df_pa["putaway_zone"] == "FC").sum()
+        _n_sfc = (df_pa["putaway_zone"] == "SFC").sum()
+        _m1, _m2, _m3 = st.columns(3)
+        _m1.metric("📦 Pending Putaway", f"{len(df_pa):,} SKUs")
+        _m2.metric("→ FC",  f"{_n_fc:,}")
+        _m3.metric("→ SFC", f"{_n_sfc:,}")
+
+        # ── Display ───────────────────────────────────────────────────────────
+        _show = [c for c in [
+            "item_number","po_reference","location_no","waiting_putaway_qty","seg",
+            "fc_d2s","sfc_qty","putaway_zone","putaway_rule","putaway_reason"
+        ] if c in df_pa.columns]
+
+        _fc1, _fc2, _fc3 = st.columns([2, 1, 1])
+        with _fc1:
+            _pa_search = st.text_input("🔍 Item Number", key="pa_search", placeholder="e.g. 100123")
+        with _fc2:
+            _pa_zone = st.selectbox("Zone", ["All", "FC", "SFC"], key="pa_zone")
+        with _fc3:
+            _pa_seg = st.selectbox("Segment", ["All"] + sorted(df_pa["seg"].dropna().unique().tolist()), key="pa_seg")
+
+        df_pa_show = df_pa[_show].copy()
+        if _pa_search:
+            df_pa_show = df_pa_show[df_pa_show["item_number"].astype(str).str.contains(_pa_search.strip(), case=False, na=False)]
+        if _pa_zone != "All":
+            df_pa_show = df_pa_show[df_pa_show["putaway_zone"] == _pa_zone]
+        if _pa_seg != "All":
+            df_pa_show = df_pa_show[df_pa_show["seg"] == _pa_seg]
+
+        for c in ["waiting_putaway_qty","fc_d2s","sfc_qty"]:
+            if c in df_pa_show.columns:
+                df_pa_show[c] = pd.to_numeric(df_pa_show[c], errors="coerce")
+
+        df_pa_show = df_pa_show.sort_values("putaway_zone", ascending=True).reset_index(drop=True)
+        df_pa_show.index = df_pa_show.index + 1
+
+        st.dataframe(
+            df_pa_show,
+            use_container_width=True,
+            column_config={
+                "po_reference":        st.column_config.TextColumn("PO Ref",       width=120),
+                "item_number":         st.column_config.TextColumn("Item",         width=110),
+                "location_no":         st.column_config.TextColumn("Location",     width=90),
+                "waiting_putaway_qty": st.column_config.NumberColumn("Qty",        width=60),
+                "seg":                 st.column_config.TextColumn("Seg",          width=70),
+                "fc_d2s":              st.column_config.NumberColumn("FC D2S",     width=75, format="%.1f"),
+                "sfc_qty":             st.column_config.NumberColumn("SFC Qty",    width=75),
+                "putaway_zone":        st.column_config.TextColumn("Zone",         width=60),
+                "putaway_rule":        st.column_config.TextColumn("Rule",         width=140),
+                "putaway_reason":      st.column_config.TextColumn("Reason",       width=220),
+            },
+        )
+        st.download_button(
+            "⬇ Download Putaway CSV",
+            df_pa_show.to_csv(index=False).encode(),
+            file_name="putaway_decisions.csv",
+            mime="text/csv",
+            key="dl_putaway",
+        )

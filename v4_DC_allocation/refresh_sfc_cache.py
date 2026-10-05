@@ -57,6 +57,19 @@ def _connect():
 
 log = []
 t_start = time.perf_counter()
+
+# ── Lock: prevent concurrent refresh runs (avoids multiple slow queries) ───────
+import fcntl as _fcntl
+_LOCK_FILE = Path("results/refresh.lock")
+_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+_lock_fh = open(_LOCK_FILE, "w")
+try:
+    _fcntl.flock(_lock_fh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+except BlockingIOError:
+    print(f"[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Another refresh already running — skipping.")
+    _lock_fh.close()
+    exit(0)
+
 print(f"\n[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Starting SFC cache refresh...")
 
 from cache_db import CacheDB
@@ -322,88 +335,130 @@ except Exception as e:
     print(f"      ERROR: {e}"); traceback.print_exc()
     log.append(f"task_lists: FAILED ({e})")
 
-# ── Step 8: FC→SFC task lists — SKU-level only (no lot query in refresh) ──────
-# Lot-level detail is loaded on-demand in the app, not pre-cached here.
-print(f"\n  [8] Building FC→SFC SKU-level task lists...")
-t0 = time.perf_counter()
-try:
-    from logic.fc_to_sfc import (
-        compute_fc_to_sfc as _compute_fc2sfc,
-        select_middle_fc_locations as _sel_mid,
-        select_tail_fc_locations as _sel_tail,
-    )
-    from data.loader import load_fc_lot_data as _load_fc_lots
-    from config import P as _P2
+# ── Step 8: FC→SFC task lists — 30-min TTL (same as main cron cycle) ──────────
+if db.age_minutes("fc2sfc_tasks") < 30:
+    print("  [8] FC→SFC tasks — cache fresh (<30min), skipping.")
+    log.append("fc2sfc: cache hit (skipped)")
+else:
+    print(f"\n  [8] Building FC→SFC task lists (lot-level)...")
+    t0 = time.perf_counter()
+    try:
+        from logic.fc_to_sfc import (
+            compute_fc_to_sfc as _compute_fc2sfc,
+            select_middle_fc_locations as _sel_mid,
+            select_tail_fc_locations as _sel_tail,
+        )
+        from data.loader import load_fc_lot_data as _load_fc_lots
+        from config import P as _P2
 
-    _cfg2 = dict(_P2)
-    _df_triggered2 = _compute_fc2sfc(df, _cfg2)
+        _cfg2 = dict(_P2)
+        _df_triggered2 = _compute_fc2sfc(df, _cfg2)
 
-    if not _df_triggered2.empty:
-        _mid  = _df_triggered2[_df_triggered2["trigger"]=="MIDDLE_EVICT"].copy()
-        _tail = _df_triggered2[_df_triggered2["trigger"]=="TAIL_CLEAR"].copy()
+        if not _df_triggered2.empty:
+            _mid  = _df_triggered2[_df_triggered2["trigger"]=="MIDDLE_EVICT"].copy()
+            _tail = _df_triggered2[_df_triggered2["trigger"]=="TAIL_CLEAR"].copy()
 
-        # Only query FC lots for TRIGGERED SKUs (not all 44K)
-        _fc_skus = list(set(_mid["item_number"].tolist() + _tail["item_number"].tolist()))
-        print(f"      Triggered: {len(_mid):,} MIDDLE, {len(_tail):,} TAIL → querying {len(_fc_skus):,} FC SKU lots...")
+            # Cap both MIDDLE and TAIL to keep query time under 60s
+            # Sort by avg_daily_orders ASC — lowest velocity (most urgent) first
+            _MID_CAP  = 1000
+            _TAIL_CAP = 1000
 
-        _df_fc_lots, _fc_err = _load_fc_lots(_fc_skus)
-        if _fc_err:
-            print(f"      FC lot query error: {_fc_err}")
-            _df_fc_lots = pd.DataFrame()
+            _mid_skus  = _mid.sort_values("avg_daily_orders",  ascending=True)["item_number"].tolist()[:_MID_CAP]
+            _tail_skus = _tail.sort_values("avg_daily_orders", ascending=True)["item_number"].tolist()[:_TAIL_CAP]
+            _fc_skus   = list(set(_mid_skus + _tail_skus))
+            print(f"      MIDDLE {len(_mid):,}→capped {len(_mid_skus):,}, TAIL {len(_tail):,}→capped {len(_tail_skus):,} → {len(_fc_skus):,} unique SKUs")
+
+            _df_fc_lots, _fc_err = _load_fc_lots(_fc_skus)
+            if _fc_err:
+                print(f"      FC lot query error: {_fc_err}")
+                _df_fc_lots = pd.DataFrame()
+            else:
+                print(f"      FC lots: {len(_df_fc_lots):,} rows")
+
+            # Build location-level rows for MIDDLE EVICT
+            _mid_rows = []
+            if not _df_fc_lots.empty:
+                _mid_set = set(_mid_skus)
+                for _, _sku_row in _mid.iterrows():
+                    if str(_sku_row["item_number"]) not in _mid_set:
+                        continue
+                    _locs = _sel_mid(_df_fc_lots, _sku_row)
+                    if not _locs.empty:
+                        _locs["segment"]          = "MIDDLE"
+                        _locs["trigger_type"]     = "MIDDLE_EVICT"
+                        _locs["excess_qty"]       = float(_sku_row.get("excess_qty", 0) or 0)
+                        _locs["keep_qty"]         = float(_sku_row.get("keep_qty", 0) or 0)
+                        _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
+                        _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
+                        _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
+                        _mid_rows.append(_locs)
+
+            # Build location-level rows for TAIL CLEAR
+            _tail_rows = []
+            if not _df_fc_lots.empty:
+                _tail_set = set(_tail_skus)
+                for _, _sku_row in _tail.iterrows():
+                    _sku = str(_sku_row["item_number"])
+                    if _sku not in _tail_set:
+                        continue
+                    _locs = _sel_tail(_df_fc_lots, _sku)
+                    if not _locs.empty:
+                        _locs["segment"]          = "TAIL"
+                        _locs["trigger_type"]     = "TAIL_CLEAR"
+                        _locs["excess_qty"]       = float(_sku_row.get("fc_qty", 0) or 0)
+                        _locs["keep_qty"]         = 0.0
+                        _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
+                        _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
+                        _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
+                        _tail_rows.append(_locs)
+
+            _df_mid_locs  = pd.concat(_mid_rows,  ignore_index=True) if _mid_rows  else pd.DataFrame()
+            _df_tail_locs = pd.concat(_tail_rows, ignore_index=True) if _tail_rows else pd.DataFrame()
+
+            # Sort by location_no ASC for sequential warehouse walk order
+            if not _df_mid_locs.empty and "location_no" in _df_mid_locs.columns:
+                _df_mid_locs = _df_mid_locs.sort_values("location_no", ascending=True).reset_index(drop=True)
+            if not _df_tail_locs.empty and "location_no" in _df_tail_locs.columns:
+                _df_tail_locs = _df_tail_locs.sort_values("location_no", ascending=True).reset_index(drop=True)
+
+            db.write_fc2sfc_tasks({
+                "MIDDLE_EVICT": _df_mid_locs,
+                "TAIL_CLEAR":   _df_tail_locs,
+            })
+            elapsed = time.perf_counter() - t0
+            print(f"      MIDDLE_EVICT: {len(_df_mid_locs):,} rows")
+            print(f"      TAIL_CLEAR:   {len(_df_tail_locs):,} rows  ({elapsed:.1f}s)")
+            log.append(f"fc2sfc: MIDDLE={len(_df_mid_locs):,} TAIL={len(_df_tail_locs):,} in {elapsed:.1f}s")
         else:
-            print(f"      FC lots: {len(_df_fc_lots):,} rows")
+            print("      No FC→SFC triggers")
+            log.append("fc2sfc: no triggers")
 
-        # Build location-level rows for MIDDLE EVICT
-        _mid_rows = []
-        if not _df_fc_lots.empty:
-            for _, _sku_row in _mid.iterrows():
-                _locs = _sel_mid(_df_fc_lots, _sku_row)
-                if not _locs.empty:
-                    _locs["segment"]          = "MIDDLE"
-                    _locs["trigger_type"]     = "MIDDLE_EVICT"
-                    _locs["excess_qty"]       = float(_sku_row.get("excess_qty", 0) or 0)
-                    _locs["keep_qty"]         = float(_sku_row.get("keep_qty", 0) or 0)
-                    _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
-                    _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
-                    _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
-                    _mid_rows.append(_locs)
+    except Exception as e:
+        import traceback
+        print(f"      ERROR in Step 8: {e}"); traceback.print_exc()
+        log.append(f"fc2sfc: FAILED ({e})")
 
-        # Build location-level rows for TAIL CLEAR
-        _tail_rows = []
-        if not _df_fc_lots.empty:
-            for _, _sku_row in _tail.iterrows():
-                _sku = str(_sku_row["item_number"])
-                _locs = _sel_tail(_df_fc_lots, _sku)
-                if not _locs.empty:
-                    _locs["segment"]          = "TAIL"
-                    _locs["trigger_type"]     = "TAIL_CLEAR"
-                    _locs["excess_qty"]       = float(_sku_row.get("fc_qty", 0) or 0)
-                    _locs["keep_qty"]         = 0.0
-                    _locs["fc_d2s"]           = _sku_row.get("fc_d2s", None)
-                    _locs["avg_daily_orders"] = float(_sku_row.get("avg_daily_orders", 0) or 0)
-                    _locs["excess_vol"]       = float(_sku_row.get("excess_vol", 0) or 0)
-                    _tail_rows.append(_locs)
-
-        _df_mid_locs  = pd.concat(_mid_rows,  ignore_index=True) if _mid_rows  else pd.DataFrame()
-        _df_tail_locs = pd.concat(_tail_rows, ignore_index=True) if _tail_rows else pd.DataFrame()
-
-        db.write_fc2sfc_tasks({
-            "MIDDLE_EVICT": _df_mid_locs,
-            "TAIL_CLEAR":   _df_tail_locs,
-        })
-        elapsed = time.perf_counter() - t0
-        print(f"      MIDDLE_EVICT: {len(_df_mid_locs):,} rows  ({len(_mid):,} SKUs)")
-        print(f"      TAIL_CLEAR:   {len(_df_tail_locs):,} rows  ({len(_tail):,} SKUs)")
-        print(f"      Done in {elapsed:.1f}s")
-        log.append(f"fc2sfc: MIDDLE={len(_df_mid_locs):,} TAIL={len(_df_tail_locs):,} in {elapsed:.1f}s")
-    else:
-        print("      No FC→SFC triggers")
-        log.append("fc2sfc: no triggers")
-
-except Exception as e:
-    import traceback
-    print(f"      ERROR in Step 8: {e}"); traceback.print_exc()
-    log.append(f"fc2sfc: FAILED ({e})")
+# ── Step 9: Pending putaway (30-min TTL — same as main cron cycle) ───────────
+if db.age_minutes("pending_putaway") < 30:
+    print("  [9] Pending putaway — cache fresh, skipping.")
+    log.append("pending_putaway: cache hit (skipped)")
+else:
+    t0 = time.perf_counter()
+    print("  [9] Loading pending putaway from RECG locations...")
+    try:
+        from data.loader import load_pending_putaway as _load_pa
+        _df_pa, _pa_err = _load_pa()
+        if _pa_err:
+            print(f"      Pending putaway query failed: {_pa_err}")
+            log.append(f"pending_putaway: FAILED ({_pa_err})")
+        else:
+            db.write_pending_putaway(_df_pa)
+            elapsed = time.perf_counter() - t0
+            print(f"      {len(_df_pa):,} SKUs pending putaway  ({elapsed:.1f}s)")
+            log.append(f"pending_putaway: {len(_df_pa):,} SKUs in {elapsed:.1f}s")
+    except Exception as e:
+        print(f"      ERROR in Step 9: {e}")
+        log.append(f"pending_putaway: FAILED ({e})")
 
 # ── Clean up legacy parquet/csv files if they exist ───────────────────────────
 for legacy in [

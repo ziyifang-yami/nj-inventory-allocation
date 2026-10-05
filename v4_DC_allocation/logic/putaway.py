@@ -12,9 +12,9 @@ Decision tree (confirmed 2026-10-01):
     TAIL → SFC (putaway_rule="tail_sfc")
 
     MIDDLE:
-      1. need_minimal_exp=1 AND new_exp < MAX(fc_exp)
-         → FC  (putaway_rule="mid_exp_worse_fc")
-         新货保质期比FC最好那批更差，进FC先出（FIFO）
+      1. need_minimal_exp=1 AND new_exp < MIN(fc_exp)
+         → FC  (putaway_rule="mid_exp_earlier_fc")
+         New goods expire earlier than FC's oldest lot — put in FC first (FEFO)
 
       2. No EXP trigger (need_minimal_exp=0 OR new_exp >= MAX(fc_exp)):
          a. fc_d2s > putaway_d2s (default 28)
@@ -71,12 +71,12 @@ def decide_putaway(sku_row, config: dict) -> dict:
     """
     putaway_d2s = config.get("putaway_d2s", 28)
 
-    seg      = _get(sku_row, "seg", "")
-    fc_d2s   = _safe_float(_get(sku_row, "fc_d2s", 0))
-    sfc_qty  = _safe_float(_get(sku_row, "sfc_qty", 0))
-    need_exp = int(_get(sku_row, "need_minimal_exp", 0) or 0)
-    new_exp  = _get(sku_row, "new_exp_date", None)
-    fc_max_exp = _get(sku_row, "fc_max_exp_date", None)
+    seg        = _get(sku_row, "seg", "")
+    fc_d2s     = _safe_float(_get(sku_row, "fc_d2s", 0))
+    sfc_qty    = _safe_float(_get(sku_row, "sfc_qty", 0))
+    need_exp   = int(_get(sku_row, "need_minimal_exp", 0) or 0)
+    new_exp    = _get(sku_row, "new_exp_date", None)
+    fc_min_exp = _get(sku_row, "fc_min_exp_date", None)  # oldest FC lot exp date
 
     # ── Branch 1: TOP ──────────────────────────────────────────────────────────
     if seg == "TOP":
@@ -96,44 +96,43 @@ def decide_putaway(sku_row, config: dict) -> dict:
 
     # ── Branch 3: MIDDLE ───────────────────────────────────────────────────────
 
-    # Step 1 — EXP check (must come before D2S check)
-    # Trigger: need_minimal_exp=1 AND new item's exp is WORSE than FC's best batch
-    # new_exp < fc_max_exp → new item expires sooner than FC's freshest lot → go to FC for FIFO
+    # Step 1 — EXP check
+    # "need exp check AND has EXP earlier than FC" (diagram YES → FC)
+    # new goods expire earlier (shorter shelf life) than FC's existing stock
+    # → put in FC so it gets consumed first (FEFO)
+    # Compare against fc_min_exp: if new goods still earlier than FC's oldest → definitely to FC
     exp_trigger = (
         need_exp == 1
         and new_exp is not None
-        and fc_max_exp is not None
-        and new_exp < fc_max_exp
+        and fc_min_exp is not None
+        and pd.Timestamp(new_exp) < pd.Timestamp(fc_min_exp)
     )
     if exp_trigger:
         return {
             "putaway_zone": "FC",
-            "putaway_rule": "mid_exp_worse_fc",
-            "putaway_reason": "新货保质期比FC最好那批更差，进FC先出（FIFO）",
+            "putaway_rule": "mid_exp_earlier_fc",
+            "putaway_reason": "New goods expire earlier than FC stock — put in FC first (FEFO)",
         }
 
-    # Step 2 — D2S check (no EXP trigger: need_minimal_exp=0, or new_exp >= fc_max_exp)
-    # 2a: FC already has sufficient stock
+    # Step 2 — D2S check (no EXP trigger)
     if fc_d2s > putaway_d2s:
         return {
             "putaway_zone": "SFC",
             "putaway_rule": "mid_fc_sufficient",
-            "putaway_reason": f"FC库存充足(D2S>{putaway_d2s})，新货入SFC",
+            "putaway_reason": f"FC has sufficient stock (D2S>{putaway_d2s}) — put new goods in SFC",
         }
 
-    # 2b: FC needs replenishment but SFC still has stock — wait for T2 transfer
     if sfc_qty > 0:
         return {
             "putaway_zone": "SFC",
             "putaway_rule": "mid_sfc_has_stock",
-            "putaway_reason": "FC需补货但SFC有货，新货入SFC等T2补回",
+            "putaway_reason": "FC needs replenishment but SFC has stock — put in SFC, wait for T2",
         }
 
-    # 2c: FC needs replenishment and SFC is empty — stock FC directly
     return {
         "putaway_zone": "FC",
         "putaway_rule": "mid_sfc_empty",
-        "putaway_reason": "FC需补货且SFC无货，新货直接入FC",
+        "putaway_reason": "FC needs replenishment and SFC is empty — put directly in FC",
     }
 
 
@@ -161,14 +160,14 @@ def run_putaway(
         putaway_zone, putaway_rule, putaway_reason
     """
     df = df_inbound.merge(
-        df_inventory[["item_number", "sfc_qty", "fc_max_exp_date"]],
+        df_inventory[["item_number", "sfc_qty", "fc_min_exp_date"]],
         on="item_number",
         how="left",
     )
 
     # Fill missing inventory fields with safe defaults
     df["sfc_qty"] = df["sfc_qty"].fillna(0)
-    df["fc_max_exp_date"] = df["fc_max_exp_date"].where(df["fc_max_exp_date"].notna(), None)
+    df["fc_min_exp_date"] = df["fc_min_exp_date"].where(df["fc_min_exp_date"].notna(), None)
 
     results = df.apply(
         lambda row: decide_putaway(row, config),
