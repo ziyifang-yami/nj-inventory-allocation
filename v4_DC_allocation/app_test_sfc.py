@@ -481,32 +481,31 @@ def _render_table(tdf, key, label, extra_caption=""):
         _page_items.append(("current" if _pn == _page else "btn", _pn))
         _prev = _pn
 
-    # ── Footer: single row, all tight columns ─────────────────
-    _fc1, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([1.2, 0.8, 0.25, 0.5, 0.25, 3.0])
+    # ── Footer: dropdown far left · nav far right ─────────────
+    _fc1, _spacer, _fc2, _fc3, _fc4 = st.columns([1.0, 4.5, 0.25, 0.5, 0.25])
     with _fc1:
-        st.markdown('<p style="font-size:0.82rem;color:#444;margin:0;padding-top:8px">Rows/Page</p>', unsafe_allow_html=True)
-    with _fc2:
         st.selectbox(
-            "rpp", options=[50, 100, 200, 500, "All"],
-            index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
+            "Rows/Page", options=[50, 100, 200, 500, "All"],
+            index=1, key=f"rowlimit_{key}", label_visibility="visible",
         )
     if _total_pages > 1:
-        with _fc3:
+        with _fc2:
             if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                 st.session_state[f"page_{key}"] = _page - 1; st.rerun()
-        with _fc4:
-            _go = st.text_input("p", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
+        with _fc3:
+            _go = st.text_input(
+                f"Page {_page} of {_total_pages}", value=str(_page),
+                key=f"page_input_{key}", label_visibility="visible",
+            )
             try:
                 _go_int = int(_go)
                 if 1 <= _go_int <= _total_pages and _go_int != _page:
                     st.session_state[f"page_{key}"] = _go_int; st.rerun()
             except ValueError:
                 pass
-        with _fc5:
+        with _fc4:
             if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                 st.session_state[f"page_{key}"] = _page + 1; st.rerun()
-        with _fc6:
-            st.caption(f"Page {_page} of {_total_pages}")
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
