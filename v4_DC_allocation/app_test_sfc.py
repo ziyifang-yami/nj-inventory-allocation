@@ -496,7 +496,7 @@ def _render_table(tdf, key, label, extra_caption=""):
     # ── Footer: page nav far right ────────────────────────────
     if _total_pages > 1:
         # Render nav as HTML — only the input needs a real widget
-        _nav_left, _nav_right = st.columns([5, 1.8])
+        _nav_left, _nav_right = st.columns([5.6, 1.2])
         with _nav_right:
             _c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.3, 0.25, 0.25, 0.2])
             with _c1:
