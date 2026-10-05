@@ -467,6 +467,19 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
+    # ── Inject CSS: narrow the dropdown and page input ────────
+    st.markdown("""<style>
+    div[data-testid="stSelectbox"] > div > div {
+        max-width: 90px !important;
+        min-width: 0 !important;
+    }
+    div[data-testid="stTextInput"] > div > div > input {
+        max-width: 55px !important;
+        min-width: 0 !important;
+        padding: 4px 6px !important;
+    }
+    </style>""", unsafe_allow_html=True)
+
     # ── Footer: rows/page left · compact page nav right ───────
     _shown = sorted(set(
         [1, _total_pages] +
@@ -482,7 +495,7 @@ def _render_table(tdf, key, label, extra_caption=""):
         _prev = _pn
 
     # ── Footer: dropdown far left · nav far right ─────────────
-    _fc1, _spacer, _fc2, _fc3, _fc4 = st.columns([1.0, 4.5, 0.25, 0.5, 0.25])
+    _fc1, _spacer, _fc2, _fc3, _fc4, _fc5 = st.columns([1.0, 4.5, 0.25, 0.8, 0.5, 0.25])
     with _fc1:
         st.selectbox(
             "Rows/Page", options=[50, 100, 200, 500, "All"],
@@ -493,8 +506,10 @@ def _render_table(tdf, key, label, extra_caption=""):
             if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                 st.session_state[f"page_{key}"] = _page - 1; st.rerun()
         with _fc3:
+            st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page of</p>', unsafe_allow_html=True)
+        with _fc4:
             _go = st.text_input(
-                f"Page {_page} of {_total_pages}", value=str(_page),
+                f"/{_total_pages}", value=str(_page),
                 key=f"page_input_{key}", label_visibility="visible",
             )
             try:
@@ -503,7 +518,7 @@ def _render_table(tdf, key, label, extra_caption=""):
                     st.session_state[f"page_{key}"] = _go_int; st.rerun()
             except ValueError:
                 pass
-        with _fc4:
+        with _fc5:
             if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                 st.session_state[f"page_{key}"] = _page + 1; st.rerun()
 
