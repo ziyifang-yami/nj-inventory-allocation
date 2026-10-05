@@ -472,10 +472,10 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── Inject CSS: narrow page input only ───────────────────
+    # ── Inject CSS: narrow page input ────────────────────────
     st.markdown("""<style>
     div[data-testid="stTextInput"] > div > div > input {
-        max-width: 42px !important;
+        max-width: 32px !important;
     }
     </style>""", unsafe_allow_html=True)
 
@@ -498,7 +498,7 @@ def _render_table(tdf, key, label, extra_caption=""):
         # Render nav as HTML — only the input needs a real widget
         _nav_left, _nav_right = st.columns([5, 1.8])
         with _nav_right:
-            _c1, _c2, _c3, _c4, _c5 = st.columns([0.3, 0.4, 0.5, 0.4, 0.3])
+            _c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.3, 0.25, 0.25, 0.2])
             with _c1:
                 if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                     st.session_state[f"page_{key}"] = _page - 1; st.rerun()
