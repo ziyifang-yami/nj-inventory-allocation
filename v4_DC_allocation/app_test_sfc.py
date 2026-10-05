@@ -494,44 +494,48 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            # Render HTML pagination visually — tight and consistent
-            def _pg_btn(pn, current):
+            import streamlit.components.v1 as _cv1
+
+            def _pg_btn_html(pn, current):
                 if pn == current:
-                    return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#4e8df5;color:#fff;border:1px solid #4e8df5;border-radius:6px;padding:0 10px;font-size:0.82rem;font-weight:600;height:30px;min-width:30px;cursor:default">{pn}</span>'
-                return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:#333;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:0.82rem;height:30px;min-width:30px">{pn}</span>'
+                    return f'<button disabled style="background:#4e8df5;color:#fff;border:1px solid #4e8df5;border-radius:6px;padding:0 10px;font-size:0.82rem;font-weight:600;height:30px;min-width:30px;cursor:default">{pn}</button>'
+                return f'<button onclick="sendPage({pn})" style="background:#fff;color:#333;border:1px solid #ddd;border-radius:6px;padding:0 10px;font-size:0.82rem;height:30px;min-width:30px;cursor:pointer">{pn}</button>'
 
-            def _arrow(symbol, disabled):
-                c = "#ccc" if disabled else "#555"
-                b = "#eee" if disabled else "#ddd"
-                return f'<span style="display:inline-flex;align-items:center;justify-content:center;background:#fff;color:{c};border:1px solid {b};border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:{"default" if disabled else "pointer"}">{symbol}</span>'
+            def _arrow_html(symbol, pn, disabled):
+                if disabled:
+                    return f'<button disabled style="background:#fff;color:#ccc;border:1px solid #eee;border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:default">{symbol}</button>'
+                return f'<button onclick="sendPage({pn})" style="background:#fff;color:#555;border:1px solid #ddd;border-radius:6px;padding:0 8px;font-size:0.9rem;height:30px;cursor:pointer">{symbol}</button>'
 
-            _parts = [_arrow("‹", _page == 1)]
+            _parts = [_arrow_html("‹", _page - 1, _page == 1)]
             for _kind, _val in _page_items:
                 if _kind == "ellipsis":
-                    _parts.append('<span style="display:inline-flex;align-items:center;color:#bbb;padding:0 4px;font-size:0.85rem;height:30px">…</span>')
+                    _parts.append('<span style="color:#bbb;padding:0 4px;font-size:0.85rem;line-height:30px">…</span>')
                 else:
-                    _parts.append(_pg_btn(_val, _page))
-            _parts.append(_arrow("›", _page == _total_pages))
+                    _parts.append(_pg_btn_html(_val, _page))
+            _parts.append(_arrow_html("›", _page + 1, _page == _total_pages))
 
-            st.markdown(
-                f'<div style="display:flex;align-items:center;gap:4px;justify-content:flex-end;padding-top:2px">{"".join(_parts)}</div>',
-                unsafe_allow_html=True,
-            )
+            _pg_html = f"""
+            <div style="display:flex;align-items:center;gap:4px;justify-content:flex-end">
+                {"".join(_parts)}
+            </div>
+            <script>
+            function sendPage(p) {{
+                window.parent.postMessage({{
+                    type: "streamlit:setComponentValue",
+                    value: p,
+                    dataType: "int"
+                }}, "*");
+            }}
+            </script>
+            """
+            _clicked_page = _cv1.html(_pg_html, height=40, scrolling=False)
+            if _clicked_page and isinstance(_clicked_page, int) and 1 <= _clicked_page <= _total_pages:
+                st.session_state[f"page_{key}"] = _clicked_page
+                st.rerun()
 
-    # ── Actual nav: hidden Streamlit buttons below ─────────────
+    # ── Remove old hidden button block (no longer needed) ──────
     if _total_pages > 1:
-        # Hide these buttons visually — they provide the click functionality
-        st.markdown(f"""<style>
-        div[data-testid="stHorizontalBlock"]:last-of-type button {{
-            opacity: 0 !important;
-            height: 1px !important;
-            min-height: 1px !important;
-            padding: 0 !important;
-            margin: 0 !important;
-            pointer-events: auto !important;
-            position: absolute !important;
-        }}
-        </style>""", unsafe_allow_html=True)
+        pass  # navigation handled by component above
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
     # T1 transfer limit controls
