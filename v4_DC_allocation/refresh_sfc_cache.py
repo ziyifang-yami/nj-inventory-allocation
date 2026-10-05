@@ -70,9 +70,9 @@ conn = _connect()
 with conn.cursor() as cur:
     cur.execute("""
         SELECT wsli.item_number,
-               SUM(CASE WHEN wsli.location_no NOT LIKE 'S%%' AND wsli.location_no NOT LIKE 'DC%%'
+               SUM(CASE WHEN wsl.zone_id != 2
                         THEN wit.quantity ELSE 0 END) AS fc_qty,
-               SUM(CASE WHEN wsli.location_no LIKE 'S%%' OR wsli.location_no LIKE 'DC%%'
+               SUM(CASE WHEN wsl.zone_id = 2
                         THEN wit.quantity ELSE 0 END) AS sfc_qty
         FROM yamibuy_wh.wh_storage_location_item wsli
         JOIN yamibuy_wh.wh_inventory_transaction wit
@@ -207,7 +207,7 @@ SQL_SFC = """
     LEFT JOIN yamibuy_im.im_item_extend iie ON iie.item_number=li.item_number
     WHERE li.warehouse_number='002' AND li.quantity>0
       AND wsl.location_type IN (3,4)
-      AND (li.location_no LIKE 'S%%' OR li.location_no LIKE 'DC%%')
+      AND wsl.zone_id = 2
       AND li.item_number IN ({ph})
     GROUP BY li.item_number, li.location_no, wsl.location_type, wis.spec
     HAVING SUM(li.quantity)>0
@@ -265,7 +265,7 @@ else:
             LEFT JOIN yamibuy_wh.wh_inbound_batch ib ON ib.lot_id=li.lot_id
             WHERE li.warehouse_number='002' AND li.quantity>0
               AND wsl.location_type IN (3,4)
-              AND li.location_no NOT LIKE 'S%%' AND li.location_no NOT LIKE 'DC%%'
+              AND wsl.zone_id != 2
               AND li.item_number IN ({ph})
             GROUP BY li.item_number
         """
@@ -321,6 +321,57 @@ except Exception as e:
     import traceback
     print(f"      ERROR: {e}"); traceback.print_exc()
     log.append(f"task_lists: FAILED ({e})")
+
+# ── Step 8: FC→SFC task lists — SKU-level only (no lot query in refresh) ──────
+# Lot-level detail is loaded on-demand in the app, not pre-cached here.
+print(f"\n  [8] Building FC→SFC SKU-level task lists...")
+t0 = time.perf_counter()
+try:
+    from logic.fc_to_sfc import compute_fc_to_sfc as _compute_fc2sfc
+    from config import P as _P2
+
+    _cfg2 = dict(_P2)
+    _df_triggered2 = _compute_fc2sfc(df, _cfg2)
+
+    if not _df_triggered2.empty:
+        _mid  = _df_triggered2[_df_triggered2["trigger"]=="MIDDLE_EVICT"].copy()
+        _tail = _df_triggered2[_df_triggered2["trigger"]=="TAIL_CLEAR"].copy()
+
+        # Add list_id column and store as fc2sfc_tasks (SKU-level, no location detail)
+        # Use item_number as location_no placeholder — app will load lots on demand
+        def _sku_to_task(df_t, list_id):
+            if df_t.empty: return pd.DataFrame()
+            r = df_t.copy()
+            r["list_id"]         = list_id
+            r["location_no"]     = ""
+            r["loc_type"]        = ""
+            r["qty_to_transfer"] = r["excess_qty"]
+            r["qty"]             = r.get("fc_qty", r["excess_qty"])
+            r["exp_date"]        = ""
+            r["rule"]            = list_id
+            r["trigger_type"]    = list_id
+            r["keep_qty"]        = r.get("keep_qty", 0)
+            r["excess_vol"]      = r.get("excess_vol", 0)
+            r["fc_d2s"]          = r.get("fc_d2s", None)
+            r["avg_daily_orders"]= r.get("avg_daily_orders", 0)
+            return r
+
+        db.write_fc2sfc_tasks({
+            "MIDDLE_EVICT": _sku_to_task(_mid,  "MIDDLE_EVICT"),
+            "TAIL_CLEAR":   _sku_to_task(_tail, "TAIL_CLEAR"),
+        })
+        elapsed = time.perf_counter() - t0
+        print(f"      MIDDLE_EVICT: {len(_mid):,} SKUs")
+        print(f"      TAIL_CLEAR:   {len(_tail):,} SKUs  ({elapsed:.1f}s)")
+        log.append(f"fc2sfc: MIDDLE={len(_mid):,} TAIL={len(_tail):,} in {elapsed:.1f}s")
+    else:
+        print("      No FC→SFC triggers")
+        log.append("fc2sfc: no triggers")
+
+except Exception as e:
+    import traceback
+    print(f"      ERROR in Step 8: {e}"); traceback.print_exc()
+    log.append(f"fc2sfc: FAILED ({e})")
 
 # ── Clean up legacy parquet/csv files if they exist ───────────────────────────
 for legacy in [

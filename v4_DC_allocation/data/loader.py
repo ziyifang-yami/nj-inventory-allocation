@@ -7,8 +7,8 @@ Adapts v3 load functions with the following v4-specific changes:
   - Shared _connect() helper (no repeated inline connection blocks)
   - inv_age_days derived from wh_inbound_batch.in_dtm (Unix timestamp)
   - case_qty parsed from im_item_extend.pieces_per_pack (varchar) — default 1
-  - SFC zone filter: location_no LIKE 'S%' OR location_no LIKE 'DC%'
-    (do NOT rely on zone_id=2; DC% locations have zone_id=0)
+  - SFC zone filter: zone_id = 2, location_type IN (3,4), warehouse_number = '002'
+    zone_id = 2 is the definitive SFC zone identifier
   - load_fc_lot_data(skus)  — FC lot-level data (for FC→SFC engine)
   - load_sfc_lot_data(skus) — SFC lot-level data with inv_age_days + case_qty
   - 30-min @st.cache_data for inventory / lot stats
@@ -88,8 +88,8 @@ def load_inventory():
         Columns: item_number, fc_qty, sfc_qty
     (None, str) on failure — error message suitable for display in UI (Req 9.5).
 
-    FC  = location_no NOT LIKE 'S%' AND NOT LIKE 'DC%'  (Req 9.2)
-    SFC = location_no LIKE 'S%' OR LIKE 'DC%'           (Req 9.3)
+    FC  = zone_id != 2, location_type IN (3,4)
+    SFC = zone_id  = 2, location_type IN (3,4)
     """
     try:
         conn = _connect()
@@ -98,13 +98,11 @@ def load_inventory():
                 SELECT
                     wsli.item_number,
                     SUM(CASE
-                        WHEN wsli.location_no NOT LIKE 'S%%'
-                         AND wsli.location_no NOT LIKE 'DC%%'
+                        WHEN wsl.zone_id != 2
                             THEN wit.quantity ELSE 0
                         END) AS fc_qty,
                     SUM(CASE
-                        WHEN wsli.location_no     LIKE 'S%%'
-                          OR wsli.location_no     LIKE 'DC%%'
+                        WHEN wsl.zone_id = 2
                             THEN wit.quantity ELSE 0
                         END) AS sfc_qty
                 FROM yamibuy_wh.wh_storage_location_item wsli
@@ -162,23 +160,13 @@ def load_capacity():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT
-                    CASE
-                        WHEN wsl.location_no NOT LIKE 'S%%'
-                         AND wsl.location_no NOT LIKE 'DC%%'
-                            THEN 'FC'
-                        ELSE 'SFC'
-                    END AS zone,
+                    CASE WHEN wsl.zone_id = 2 THEN 'SFC' ELSE 'FC' END AS zone,
                     CASE
                         WHEN wsl.location_type = 4 THEN 'Bin'
                         WHEN wsl.location_type = 3 THEN 'Stock'
                     END AS loc_type,
                     CONCAT(
-                        CASE
-                            WHEN wsl.location_no NOT LIKE 'S%%'
-                             AND wsl.location_no NOT LIKE 'DC%%'
-                                THEN 'FC'
-                            ELSE 'SFC'
-                        END,
+                        CASE WHEN wsl.zone_id = 2 THEN 'SFC' ELSE 'FC' END,
                         '_',
                         CASE
                             WHEN wsl.location_type = 4 THEN 'Bin'
@@ -448,7 +436,7 @@ def load_fc_lot_data(skus: list[str]):
           need_minimal_exp (int)
     (None, str) on failure.
 
-    Zone filter: NOT LIKE 'S%' AND NOT LIKE 'DC%'
+    Zone filter: zone_id != 2, location_type IN (3,4), warehouse_number = '002'
     """
     if not skus:
         return pd.DataFrame(
@@ -495,8 +483,7 @@ def load_fc_lot_data(skus: list[str]):
             WHERE li.warehouse_number = '002'
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
-              AND li.location_no NOT LIKE 'S%%'
-              AND li.location_no NOT LIKE 'DC%%'
+              AND wsl.zone_id != 2
               AND li.item_number IN ({ph})
             GROUP BY li.item_number, li.location_no, wsl.location_type,
                      lm.lot_id, lm.receive_time, wis.spec
@@ -634,7 +621,7 @@ def load_sfc_lot_data(skus_tuple: tuple):
             WHERE li.warehouse_number = '002'
               AND li.quantity > 0
               AND wsl.location_type IN (3, 4)
-              AND (li.location_no LIKE 'S%%' OR li.location_no LIKE 'DC%%')
+              AND wsl.zone_id = 2
               AND li.item_number IN ({ph})
             GROUP BY li.item_number, li.location_no, wsl.location_type, wis.spec
             HAVING SUM(li.quantity) > 0
@@ -712,8 +699,7 @@ def load_sku_loc_stats(skus_tuple: tuple):
         WHERE li.warehouse_number = '002'
           AND li.quantity > 0
           AND wsl.location_type IN (3, 4)
-          AND li.location_no NOT LIKE 'S%%'
-          AND li.location_no NOT LIKE 'DC%%'
+          AND wsl.zone_id != 2
           AND li.item_number IN ({ph})
         GROUP BY li.item_number
     """
@@ -803,8 +789,7 @@ def load_fc_exp_summary(skus_tuple: tuple):
         WHERE li.warehouse_number = '002'
           AND li.quantity > 0
           AND wsl.location_type IN (3, 4)
-          AND li.location_no NOT LIKE 'S%%'
-          AND li.location_no NOT LIKE 'DC%%'
+          AND wsl.zone_id != 2
           AND li.item_number IN ({ph})
         GROUP BY li.item_number
     """
@@ -879,8 +864,7 @@ def load_fc_exp_summary_all():
         WHERE li.warehouse_number = '002'
           AND li.quantity > 0
           AND wsl.location_type IN (3, 4)
-          AND li.location_no NOT LIKE 'S%%'
-          AND li.location_no NOT LIKE 'DC%%'
+          AND wsl.zone_id != 2
         GROUP BY li.item_number
         HAVING fc_max_exp_date IS NOT NULL
     """
@@ -971,7 +955,7 @@ def load_sfc_lot_data_all():
             ON  wsl.location_no      = li.location_no
             AND wsl.warehouse_number = li.warehouse_number
             AND wsl.location_type   IN (3, 4)
-            AND (wsl.location_no LIKE 'S%' OR wsl.location_no LIKE 'DC%')
+            AND wsl.zone_id = 2
         LEFT JOIN yamibuy_wh.wh_lot_master lm
             ON  lm.lot_id = li.lot_id
         LEFT JOIN yamibuy_wh.wh_inbound_batch ib
