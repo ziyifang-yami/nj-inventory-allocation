@@ -483,24 +483,21 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     _lft_col, _rgt_col = st.columns([1.5, 3])
     with _lft_col:
-        _rpp_col1, _rpp_col2 = st.columns([1, 1.5])
-        with _rpp_col1:
-            st.markdown('<p style="font-size:0.9rem;color:#444;margin:0;padding-top:8px;white-space:nowrap">rows/page</p>', unsafe_allow_html=True)
-        with _rpp_col2:
-            st.selectbox(
-                "rpp", options=[50, 100, 200, 500, "All"],
-                index=1, key=f"rowlimit_{key}", label_visibility="collapsed",
-            )
+        st.selectbox(
+            "Rows/Page", options=[50, 100, 200, 500, "All"],
+            index=1, key=f"rowlimit_{key}", label_visibility="visible",
+        )
 
     with _rgt_col:
         if _total_pages > 1:
-            _, _cp, _lbl, _np, _cn = st.columns([2, 0.4, 0.6, 0.8, 0.4])
+            # Push to right using a flex container — 3 tight cols, no spacer
+            _cp, _lbl, _np, _cn = st.columns([0.3, 0.4, 0.6, 0.3])
             with _cp:
                 if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                     st.session_state[f"page_{key}"] = _page - 1
                     st.rerun()
             with _lbl:
-                st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:7px;text-align:right">Page</p>', unsafe_allow_html=True)
+                st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:7px;text-align:right;white-space:nowrap">Page</p>', unsafe_allow_html=True)
             with _np:
                 _go = st.text_input(
                     "p", value=str(_page), key=f"page_input_{key}",
@@ -518,8 +515,6 @@ def _render_table(tdf, key, label, extra_caption=""):
                     st.session_state[f"page_{key}"] = _page + 1
                     st.rerun()
 
-    if _total_pages > 1:
-        pass
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
     # T1 transfer limit controls
