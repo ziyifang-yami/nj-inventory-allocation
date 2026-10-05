@@ -494,67 +494,29 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
+            # select_slider: clean, compact, no column spreading
+            # Only show a window of pages around current to keep it short
+            _window = sorted(set(
+                [1, _total_pages] +
+                list(range(max(1, _page - 2), min(_total_pages, _page + 2) + 1))
+            ))
+            # Convert to strings for display, mark current
+            _options = [str(p) for p in range(1, _total_pages + 1)]
+
             st.markdown("""<style>
-            /* Make all secondary buttons in pagination look like pills */
-            button[data-testid="baseButton-secondary"] {
-                border: 1px solid #ddd !important;
-                border-radius: 5px !important;
-                background: #fff !important;
-                color: #333 !important;
-                font-size: 0.8rem !important;
-                height: 28px !important;
-                min-height: 28px !important;
-                padding: 0 9px !important;
-                line-height: 1 !important;
-                margin: 0 !important;
-            }
-            button[data-testid="baseButton-secondary"]:hover {
-                border-color: #4e8df5 !important;
-                color: #4e8df5 !important;
-            }
-            button[data-testid="baseButton-secondary"]:disabled {
-                color: #ccc !important;
-                border-color: #eee !important;
-            }
-            /* Make the columns inside pagination row behave as flex items */
-            div[data-testid="stHorizontalBlock"]:has(button[data-testid="baseButton-secondary"]) {
-                gap: 3px !important;
-                flex-wrap: nowrap !important;
-                justify-content: flex-end !important;
-            }
-            div[data-testid="stHorizontalBlock"]:has(button[data-testid="baseButton-secondary"]) > div[data-testid="column"] {
-                flex: 0 0 auto !important;
-                width: auto !important;
-                min-width: 0 !important;
-                padding: 0 !important;
-            }
+            div[data-testid="stSlider"] {margin-top:2px}
+            div[data-testid="stSlider"] > label {display:none}
             </style>""", unsafe_allow_html=True)
 
-            _nav_items = []
-            _nav_items.append(("prev", _page - 1, _page == 1))
-            for _kind, _val in _page_items:
-                if _kind == "ellipsis":
-                    _nav_items.append(("ellipsis", None, False))
-                else:
-                    _nav_items.append(("page", _val, _val == _page))
-            _nav_items.append(("next", _page + 1, _page == _total_pages))
-
-            _cols = st.columns(len(_nav_items))
-            for _i, (_kind, _val, _state) in enumerate(_nav_items):
-                with _cols[_i]:
-                    if _kind == "ellipsis":
-                        st.markdown('<p style="color:#bbb;font-size:0.8rem;text-align:center;margin:0;padding-top:5px;min-width:16px">…</p>', unsafe_allow_html=True)
-                    elif _kind == "page" and _state:
-                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:5px;text-align:center;font-size:0.8rem;font-weight:600;height:28px;line-height:28px;padding:0 9px;white-space:nowrap">{_val}</div>', unsafe_allow_html=True)
-                    elif _kind == "prev":
-                        if st.button("‹", key=f"prev_{key}", disabled=_state):
-                            st.session_state[f"page_{key}"] = _val; st.rerun()
-                    elif _kind == "next":
-                        if st.button("›", key=f"next_{key}", disabled=_state):
-                            st.session_state[f"page_{key}"] = _val; st.rerun()
-                    else:
-                        if st.button(str(_val), key=f"pg_{key}_{_val}"):
-                            st.session_state[f"page_{key}"] = _val; st.rerun()
+            _sel = st.select_slider(
+                "page", options=_options,
+                value=str(_page),
+                key=f"pgnav_{key}",
+                label_visibility="collapsed",
+            )
+            if int(_sel) != _page:
+                st.session_state[f"page_{key}"] = int(_sel)
+                st.rerun()
 
     if _total_pages > 1:
         pass
