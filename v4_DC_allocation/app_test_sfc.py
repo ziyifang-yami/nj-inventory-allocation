@@ -496,14 +496,14 @@ def _render_table(tdf, key, label, extra_caption=""):
     # ── Footer: page nav far right ────────────────────────────
     if _total_pages > 1:
         # Render nav as HTML — only the input needs a real widget
-        _nav_left, _nav_right = st.columns([5.6, 1.0])
+        _nav_left, _nav_right = st.columns([5.2, 1.6])
         with _nav_right:
-            _c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.3, 0.25, 0.25, 0.2])
+            _c1, _c2, _c3, _c4, _c5 = st.columns([0.2, 0.35, 0.25, 0.3, 0.2])
             with _c1:
                 if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                     st.session_state[f"page_{key}"] = _page - 1; st.rerun()
             with _c2:
-                st.markdown('<p style="font-size:1 rem;color:#555;margin:0;padding-top:8px;text-align:right">Page</p>', unsafe_allow_html=True)
+                st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
             with _c3:
                 _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
                 try:
@@ -513,7 +513,7 @@ def _render_table(tdf, key, label, extra_caption=""):
                 except ValueError:
                     pass
             with _c4:
-                st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px">/ {_total_pages}</p>', unsafe_allow_html=True)
+                st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
             with _c5:
                 if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                     st.session_state[f"page_{key}"] = _page + 1; st.rerun()
