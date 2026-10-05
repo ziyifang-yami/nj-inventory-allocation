@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import tempfile
+import streamlit.components.v1 as _cv1
 
 from data.loader import load, load_inventory, load_sfc_lot_data, load_fc_exp_summary
 from logic.sfc_to_fc import build_sfc_to_fc_lists
@@ -28,6 +30,58 @@ st.markdown("## SFC → FC Plan")
 
 DB_PATH = "results/sfc_cache.db"
 DB_CACHE = CacheDB(DB_PATH)
+
+# ── Pagination component — declared once, reused per tab ─────
+_PGCOMP_DIR = Path(tempfile.gettempdir()) / "st_pgcomp"
+_PGCOMP_DIR.mkdir(exist_ok=True)
+(_PGCOMP_DIR / "index.html").write_text("""
+<html><head><style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:inherit}
+body{display:flex;align-items:center;justify-content:flex-end;height:36px;overflow:hidden}
+#pg{display:flex;gap:4px;align-items:center}
+button{border:1px solid #ddd;border-radius:5px;background:#fff;color:#333;
+  font-size:0.8rem;height:28px;min-width:28px;padding:0 9px;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center}
+button:hover{border-color:#4e8df5;color:#4e8df5}
+button.active{background:#4e8df5;border-color:#4e8df5;color:#fff;font-weight:600;cursor:default}
+button:disabled{color:#ccc;border-color:#eee;cursor:default}
+.dot{color:#bbb;font-size:0.85rem;padding:0 2px}
+</style></head>
+<body><div id="pg"></div>
+<script>
+const params=new URLSearchParams(window.location.search);
+const page=parseInt(params.get('page')||'1');
+const total=parseInt(params.get('total')||'1');
+function send(p){Streamlit.setComponentValue(p);}
+function shown(){
+  let s=new Set([1,total]);
+  for(let i=Math.max(1,page-2);i<=Math.min(total,page+2);i++) s.add(i);
+  return [...s].sort((a,b)=>a-b);
+}
+function render(){
+  const pg=document.getElementById('pg');
+  const pages=shown();
+  let html='';
+  html+=`<button ${page<=1?'disabled':''} onclick="send(${page-1})">&#8249;</button>`;
+  let prev=null;
+  for(const p of pages){
+    if(prev&&p-prev>1) html+=`<span class="dot">…</span>`;
+    if(p===page) html+=`<button class="active">${p}</button>`;
+    else html+=`<button onclick="send(${p})">${p}</button>`;
+    prev=p;
+  }
+  html+=`<button ${page>=total?'disabled':''} onclick="send(${page+1})">&#8250;</button>`;
+  pg.innerHTML=html;
+}
+window.addEventListener('load',()=>{
+  if(window.Streamlit){render();Streamlit.setFrameHeight(36);}
+  else{document.addEventListener('streamlit:render',()=>{render();Streamlit.setFrameHeight(36);});}
+});
+</script>
+<script src="https://unpkg.com/streamlit-component-lib/dist/index.js"></script>
+</body></html>
+""")
+_paginator = _cv1.declare_component("paginator", path=str(_PGCOMP_DIR))
 
 # Show last sync time — use most recent of sfc_lots / fc_exp (they refresh together)
 import sqlite3 as _sq3
@@ -494,54 +548,13 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     with _rgt_col:
         if _total_pages > 1:
-            # All page nav in ONE column — prevents spreading
-            # Build prev, page numbers, next as a flex row via CSS
-            _nav_items = []
-            _nav_items.append(("prev", _page - 1, _page == 1))
-            for _kind, _val in _page_items:
-                if _kind == "ellipsis":
-                    _nav_items.append(("ellipsis", "…", False))
-                else:
-                    _nav_items.append(("page", _val, _val == _page))
-            _nav_items.append(("next", _page + 1, _page == _total_pages))
+            _clicked = _paginator(page=_page, total=_total_pages, key=f"pgnav_{key}", default=None)
+            if _clicked and isinstance(_clicked, int) and 1 <= _clicked <= _total_pages and _clicked != _page:
+                st.session_state[f"page_{key}"] = _clicked
+                st.rerun()
 
-            # Render all as st.button in a single flex container
-            # Inject CSS to make ALL buttons in this section small
-            _uid = f"nav_{key}"
-            st.markdown(f"""
-            <style>
-            .{_uid} {{display:flex;align-items:center;gap:4px;justify-content:flex-end;flex-wrap:nowrap}}
-            .{_uid} > div[data-testid="column"] {{flex:0 0 auto!important;width:auto!important;min-width:0!important}}
-            .{_uid} button {{padding:0 9px!important;height:28px!important;min-height:28px!important;font-size:0.8rem!important;line-height:1!important;border-radius:5px!important}}
-            </style>
-            <div class="{_uid}" id="{_uid}">
-            """, unsafe_allow_html=True)
-
-            _btn_cols = st.columns([0.3] * len(_nav_items))
-            for _i, (_kind, _val, _state) in enumerate(_nav_items):
-                with _btn_cols[_i]:
-                    if _kind == "ellipsis":
-                        st.markdown('<span style="color:#bbb;font-size:0.8rem;padding:0 2px">…</span>', unsafe_allow_html=True)
-                    elif _kind == "page" and _state:  # current page
-                        st.markdown(f'<div style="background:#4e8df5;color:#fff;border-radius:5px;text-align:center;font-size:0.8rem;font-weight:600;height:28px;line-height:28px;padding:0 9px;white-space:nowrap">{_val}</div>', unsafe_allow_html=True)
-                    elif _kind == "prev":
-                        if st.button("‹", key=f"prev_{key}", disabled=_state):
-                            st.session_state[f"page_{key}"] = _val
-                            st.rerun()
-                    elif _kind == "next":
-                        if st.button("›", key=f"next_{key}", disabled=_state):
-                            st.session_state[f"page_{key}"] = _val
-                            st.rerun()
-                    else:
-                        if st.button(str(_val), key=f"pg_{key}_{_val}"):
-                            st.session_state[f"page_{key}"] = _val
-                            st.rerun()
-
-            st.markdown('</div>', unsafe_allow_html=True)
-
-    # ── Remove old hidden button block (no longer needed) ──────
     if _total_pages > 1:
-        pass  # navigation handled by component above
+        pass
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
     # T1 transfer limit controls
