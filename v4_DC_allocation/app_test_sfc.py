@@ -495,25 +495,28 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     # ── Footer: page nav far right ────────────────────────────
     if _total_pages > 1:
-        _, _fc2, _fc3, _fc4, _fc5, _fc6 = st.columns([4.8, 0.2, 0.35, 0.3, 0.35, 0.2])
-        with _fc2:
-            if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
-                st.session_state[f"page_{key}"] = _page - 1; st.rerun()
-        with _fc3:
-            st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
-        with _fc4:
-            _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
-            try:
-                _go_int = int(_go)
-                if 1 <= _go_int <= _total_pages and _go_int != _page:
-                    st.session_state[f"page_{key}"] = _go_int; st.rerun()
-            except ValueError:
-                pass
-        with _fc5:
-            st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
-        with _fc6:
-            if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
-                st.session_state[f"page_{key}"] = _page + 1; st.rerun()
+        # Render nav as HTML — only the input needs a real widget
+        _nav_left, _nav_right = st.columns([5, 1.8])
+        with _nav_right:
+            _c1, _c2, _c3, _c4, _c5 = st.columns([0.3, 0.4, 0.5, 0.4, 0.3])
+            with _c1:
+                if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
+                    st.session_state[f"page_{key}"] = _page - 1; st.rerun()
+            with _c2:
+                st.markdown('<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px;text-align:right">Page</p>', unsafe_allow_html=True)
+            with _c3:
+                _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
+                try:
+                    _go_int = int(_go)
+                    if 1 <= _go_int <= _total_pages and _go_int != _page:
+                        st.session_state[f"page_{key}"] = _go_int; st.rerun()
+                except ValueError:
+                    pass
+            with _c4:
+                st.markdown(f'<p style="font-size:0.82rem;color:#555;margin:0;padding-top:8px">/ {_total_pages}</p>', unsafe_allow_html=True)
+            with _c5:
+                if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
+                    st.session_state[f"page_{key}"] = _page + 1; st.rerun()
 
 # ── T1 tab — has transfer limit sliders ──────────────────────
 with t1:
