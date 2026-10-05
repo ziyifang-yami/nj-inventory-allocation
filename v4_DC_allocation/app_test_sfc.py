@@ -409,10 +409,10 @@ def _render_table(tdf, key, label, extra_caption=""):
         if c in tdf.columns:
             tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
-    # ── Filters ──────────────────────────────────────────────
-    _fc1, _fc2, _fc3 = st.columns([2, 1, 1])
+    # ── Filters — single row ──────────────────────────────────
+    _fc1, _fc2, _fc3 = st.columns([1.2, 1, 1])
     with _fc1:
-        _search = st.text_input("🔍 Item Number", key=f"search_{key}", placeholder="e.g. 100123")
+        _search = st.text_input("🔍 Item", key=f"search_{key}", placeholder="Item number")
     with _fc2:
         _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
         _seg_filter = st.selectbox("Segment", _segs, key=f"seg_{key}")
@@ -426,27 +426,6 @@ def _render_table(tdf, key, label, extra_caption=""):
         tdf = tdf[tdf["segment"] == _seg_filter]
     if _loc_filter != "All" and "loc_type" in tdf.columns:
         tdf = tdf[tdf["loc_type"] == _loc_filter]
-
-    # ── Row limit ─────────────────────────────────────────────
-    _total_rows = len(tdf)
-    _rl1, _rl2 = st.columns([2, 1])
-    with _rl1:
-        _preset = st.selectbox(
-            "Rows to show",
-            options=["All", 500, 200, 100, 50],
-            index=0,
-            key=f"rowlimit_preset_{key}",
-        )
-    with _rl2:
-        _custom = st.number_input(
-            "Custom rows", min_value=1, max_value=_total_rows or 1,
-            value=None, placeholder="or type...",
-            key=f"rowlimit_custom_{key}",
-        )
-    if _custom:
-        tdf = tdf.iloc[:int(_custom)]
-    elif _preset != "All":
-        tdf = tdf.iloc[:int(_preset)]
 
     # ── Sort: TOP first then MIDDLE, within each segment by location_no ASC ──
     if "segment" in tdf.columns and "location_no" in tdf.columns:
@@ -464,7 +443,21 @@ def _render_table(tdf, key, label, extra_caption=""):
     caption = f"{len(tdf):,} rows · {n_skus} SKUs"
     if extra_caption:
         caption += f" · {extra_caption}"
-    st.caption(caption)
+
+    # ── Caption + Rows selector on same line ──────────────────
+    _cap_col, _rows_col = st.columns([3, 1])
+    with _cap_col:
+        st.caption(caption)
+    with _rows_col:
+        _preset = st.selectbox(
+            "Rows to show", options=["All", 500, 200, 100, 50],
+            index=3,  # default 100
+            key=f"rowlimit_{key}", label_visibility="collapsed",
+        )
+
+    if _preset != "All":
+        tdf = tdf.iloc[:int(_preset)]
+
     st.dataframe(tdf, use_container_width=True)
     st.download_button(
         f"⬇ {label} CSV", tdf.to_csv(index=False).encode(),
