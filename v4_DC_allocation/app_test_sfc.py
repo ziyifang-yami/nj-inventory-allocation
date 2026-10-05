@@ -427,6 +427,28 @@ def _render_table(tdf, key, label, extra_caption=""):
     if _loc_filter != "All" and "loc_type" in tdf.columns:
         tdf = tdf[tdf["loc_type"] == _loc_filter]
 
+    # ── Row limit ─────────────────────────────────────────────
+    _total_rows = len(tdf)
+    _row_presets = [50, 100, 200, 500]
+    _preset_labels = [str(n) for n in _row_presets if n <= _total_rows] + ["All"]
+    _rl1, _rl2 = st.columns([2, 1])
+    with _rl1:
+        _preset = st.select_slider(
+            "Rows to show", options=_preset_labels,
+            value=_preset_labels[0] if len(_preset_labels) > 1 else "All",
+            key=f"rowlimit_preset_{key}",
+        )
+    with _rl2:
+        _custom = st.number_input(
+            "Custom rows", min_value=1, max_value=_total_rows or 1,
+            value=None, placeholder="or type...",
+            key=f"rowlimit_custom_{key}",
+        )
+    if _custom:
+        tdf = tdf.iloc[:int(_custom)]
+    elif _preset != "All":
+        tdf = tdf.iloc[:int(_preset)]
+
     # ── Sort: TOP first then MIDDLE, within each segment by location_no ASC ──
     if "segment" in tdf.columns and "location_no" in tdf.columns:
         tdf["_seg_order"] = tdf["segment"].map({"TOP": 0, "MIDDLE": 1}).fillna(2)
