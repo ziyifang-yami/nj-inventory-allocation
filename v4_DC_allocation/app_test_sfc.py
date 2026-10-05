@@ -444,6 +444,10 @@ def _render_table(tdf, key, label, extra_caption=""):
     if extra_caption:
         caption += f" · {extra_caption}"
 
+    # ── Apply row limit (reads from session_state, 100 default) ──
+    _preset = st.session_state.get(f"rowlimit_{key}", 100)
+    tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
+
     # ── Caption + Download on same line ───────────────────────
     _cap_col, _dl_col = st.columns([3, 1])
     with _cap_col:
@@ -454,10 +458,6 @@ def _render_table(tdf, key, label, extra_caption=""):
             file_name=f"sfc_to_fc_{key.lower()}.csv", mime="text/csv", key=f"dl_{key}",
             use_container_width=True,
         )
-
-    # ── Apply row limit before rendering ─────────────────────
-    _preset = st.session_state.get(f"rowlimit_{key}", 100)
-    tdf_show = tdf.iloc[:int(_preset)] if _preset != "All" else tdf
 
     st.dataframe(tdf_show, use_container_width=True)
 
