@@ -411,8 +411,8 @@ tab_dash, tab_compare, tab_fc2sfc, tab_sfc2fc, tab_putaway = st.tabs([
 
 with tab_dash:
 
-    # ── Tier Cards ────────────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
+    # ── Tier Cards — 4 columns including TBD ─────────────────────
+    c1, c2, c3, c4 = st.columns(4)
 
     def card(col, label, st_data, color):
         with col:
@@ -442,96 +442,76 @@ with tab_dash:
             </div>
             """, unsafe_allow_html=True)
 
-    card(c1, "TOP — FC Primary",   T,  COLORS["TOP"])
-    card(c2, "MIDDLE — Dual WH",   M,  COLORS["MIDDLE"])
-    card(c3, "TAIL — DC Primary",  TL, COLORS["TAIL"])
-
-    # TBD card — new products with < 30 instock days
-    st.markdown(f"""
-    <div style="background:#f0f0f0;border-radius:12px;padding:14px 20px;margin-bottom:8px;
-                display:flex;align-items:center;gap:24px;color:#555">
-      <div>
-        <div style="font-size:0.78rem;font-weight:500;text-transform:uppercase;letter-spacing:.04em;opacity:.7">
-          🆕 TBD — New Products
-        </div>
-        <div style="font-size:1.6rem;font-weight:700;color:#333">{TBD['n']:,}</div>
-        <div style="font-size:0.82rem;opacity:.7">{TBD['psku']:.1f}% of in-stock SKUs · In-stock days &lt; 30 · Excluded from transfer decisions</div>
-      </div>
-      <div style="margin-left:auto;text-align:right">
-        <div style="font-size:0.78rem;opacity:.7">FC Qty</div>
-        <div style="font-size:1.1rem;font-weight:600">{TBD['fc']:,}</div>
-        <div style="font-size:0.78rem;opacity:.7;margin-top:4px">SFC Qty</div>
-        <div style="font-size:1.1rem;font-weight:600">{TBD['sfc']:,}</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    card(c1, "TOP — FC Primary",      T,   COLORS["TOP"])
+    card(c2, "MIDDLE — Dual WH",      M,   COLORS["MIDDLE"])
+    card(c3, "TAIL — DC Primary",     TL,  COLORS["TAIL"])
+    card(c4, "TBD — New Products",    TBD, "#888888")
 
     st.divider()
 
     # ── Two column layout ─────────────────────────────────────────
     left, right = st.columns([1, 1], gap="large")
 
-# LEFT: Donut charts
+    _ALL_SEGS   = ["TOP", "MIDDLE", "TAIL", "TBD"]
+    _ALL_COLORS = [COLORS["TOP"], COLORS["MIDDLE"], COLORS["TAIL"], "#888888"]
+    _ALL_DATA   = [T, M, TL, TBD]
+
+# LEFT: Bar charts — SKU and OL distribution (including TBD)
     with left:
         st.markdown("#### SKU & OL Distribution")
 
         seg_df = pd.DataFrame([
-            {"Tier": "TOP",    "SKUs": T["n"],  "OL": T["pol"]},
-            {"Tier": "MIDDLE", "SKUs": M["n"],  "OL": M["pol"]},
-            {"Tier": "TAIL",   "SKUs": TL["n"], "OL": TL["pol"]},
+            {"Tier": seg, "SKUs": d["n"], "OL%": d["pol"]}
+            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
         ])
 
-        fc1, fc2 = st.columns(2)
-        with fc1:
-            fig_s = go.Figure(go.Pie(
-                labels=seg_df["Tier"], values=seg_df["SKUs"],
-                hole=.55, marker_colors=[COLORS[t] for t in seg_df["Tier"]],
-                textinfo="percent", showlegend=False,
-            ))
-            fig_s.update_layout(margin=dict(t=30,b=0,l=0,r=0), height=200,
-                                title=dict(text="SKUs", x=.5, font_size=13))
-            st.plotly_chart(fig_s, use_container_width=True)
-
-        with fc2:
-            fig_o = go.Figure(go.Pie(
-                labels=seg_df["Tier"],
-                values=[T["pol"], M["pol"], TL["pol"]],
-                hole=.55, marker_colors=[COLORS[t] for t in seg_df["Tier"]],
-                textinfo="percent", showlegend=False,
-            ))
-            fig_o.update_layout(margin=dict(t=30,b=0,l=0,r=0), height=200,
-                                title=dict(text="Order Lines", x=.5, font_size=13))
-            st.plotly_chart(fig_o, use_container_width=True)
-
-        # Legend
-        st.markdown(
-            " &nbsp; ".join([
-                f"<span style='color:{COLORS[t]};font-size:.85rem'>■ {t}</span>"
-                for t in ["TOP","MIDDLE","TAIL"]
-            ]),
-            unsafe_allow_html=True
+        fig_s = go.Figure(go.Bar(
+            x=seg_df["Tier"], y=seg_df["SKUs"],
+            marker_color=_ALL_COLORS,
+            text=seg_df["SKUs"].apply(lambda v: f"{v:,}"),
+            textposition="outside",
+        ))
+        fig_s.update_layout(
+            margin=dict(t=30,b=0,l=0,r=0), height=220,
+            title=dict(text="SKU Count by Segment", x=0, font_size=13),
+            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
+            xaxis=dict(showgrid=False), plot_bgcolor="white",
+            showlegend=False,
         )
+        st.plotly_chart(fig_s, use_container_width=True)
 
-    # RIGHT: FC vs SFC inventory chart
+        fig_o = go.Figure(go.Bar(
+            x=seg_df["Tier"], y=seg_df["OL%"],
+            marker_color=_ALL_COLORS,
+            text=seg_df["OL%"].apply(lambda v: f"{v:.1f}%"),
+            textposition="outside",
+        ))
+        fig_o.update_layout(
+            margin=dict(t=30,b=0,l=0,r=0), height=220,
+            title=dict(text="Order Lines % by Segment", x=0, font_size=13),
+            yaxis=dict(ticksuffix="%", showgrid=True, gridcolor="#f0f0f0"),
+            xaxis=dict(showgrid=False), plot_bgcolor="white",
+            showlegend=False,
+        )
+        st.plotly_chart(fig_o, use_container_width=True)
+
+    # RIGHT: FC vs SFC inventory chart (including TBD)
     with right:
         inv_df = pd.DataFrame([
-            {"Tier": "TOP",    "FC": T["fc"],   "SFC": T["sfc"]},
-            {"Tier": "MIDDLE", "FC": M["fc"],   "SFC": M["sfc"]},
-            {"Tier": "TAIL",   "FC": TL["fc"],  "SFC": TL["sfc"]},
+            {"Tier": seg, "FC": d["fc"], "SFC": d["sfc"]}
+            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
         ])
         fig_inv = go.Figure()
         fig_inv.add_trace(go.Bar(name="FC",  x=inv_df["Tier"], y=inv_df["FC"],
-                                 marker_color=[COLORS[t] for t in inv_df["Tier"]],
-                                 opacity=.9))
+                                 marker_color=_ALL_COLORS, opacity=.9))
         fig_inv.add_trace(go.Bar(name="SFC", x=inv_df["Tier"], y=inv_df["SFC"],
-                                 marker_color=[COLORS[t] for t in inv_df["Tier"]],
-                                 opacity=.45))
+                                 marker_color=_ALL_COLORS, opacity=.45))
         fig_inv.update_layout(
-            barmode="stack", height=280, margin=dict(t=30,b=0,l=0,r=0),
-            title=dict(text="FC vs SFC Inventory", x=0, font_size=13),
-            legend=dict(orientation="h", x=1, xanchor="right", y=1.1),
-            yaxis=dict(tickformat=","), plot_bgcolor="white",
-            xaxis=dict(showgrid=False), yaxis_gridcolor="#f0f0f0",
+            barmode="stack", height=460, margin=dict(t=30,b=0,l=0,r=0),
+            title=dict(text="FC vs SFC Inventory by Segment", x=0, font_size=13),
+            legend=dict(orientation="h", x=1, xanchor="right", y=1.05),
+            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
+            xaxis=dict(showgrid=False), plot_bgcolor="white",
         )
         st.plotly_chart(fig_inv, use_container_width=True)
 
