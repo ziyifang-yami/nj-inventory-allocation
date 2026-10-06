@@ -353,6 +353,12 @@ _seg_arr = _np.where(
 df["seg"] = _seg_arr
 df["biz_type"] = df["item_number"].astype(str).str[0].map({"1": "自营", "5": "FBY"}).fillna("Other")
 
+# ── TBD: in-stock days < 30 → not enough sales history ───────
+from cache_db import CacheDB as _CacheDB_main
+_db_main = _CacheDB_main("results/sfc_cache.db")
+if "inv_days_30" in df.columns:
+    df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+
 # ── 只保留库内有库存的 SKU（fc_qty>0 或 sfc_qty>0）────────────
 for c in ["fc_qty", "sfc_qty"]:
     df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -378,6 +384,7 @@ def stats(seg):
     )
 
 T = stats("TOP"); M = stats("MIDDLE"); TL = stats("TAIL")
+TBD = stats("TBD")
 
 # ── Header ────────────────────────────────────────────────────
 st.markdown("## NJ Inventory Allocation")
@@ -438,6 +445,26 @@ with tab_dash:
     card(c1, "TOP — FC Primary",   T,  COLORS["TOP"])
     card(c2, "MIDDLE — Dual WH",   M,  COLORS["MIDDLE"])
     card(c3, "TAIL — DC Primary",  TL, COLORS["TAIL"])
+
+    # TBD card — new products with < 30 instock days
+    st.markdown(f"""
+    <div style="background:#f0f0f0;border-radius:12px;padding:14px 20px;margin-bottom:8px;
+                display:flex;align-items:center;gap:24px;color:#555">
+      <div>
+        <div style="font-size:0.78rem;font-weight:500;text-transform:uppercase;letter-spacing:.04em;opacity:.7">
+          🆕 TBD — New Products
+        </div>
+        <div style="font-size:1.6rem;font-weight:700;color:#333">{TBD['n']:,}</div>
+        <div style="font-size:0.82rem;opacity:.7">{TBD['psku']:.1f}% of in-stock SKUs · In-stock days &lt; 30 · Excluded from transfer decisions</div>
+      </div>
+      <div style="margin-left:auto;text-align:right">
+        <div style="font-size:0.78rem;opacity:.7">FC Qty</div>
+        <div style="font-size:1.1rem;font-weight:600">{TBD['fc']:,}</div>
+        <div style="font-size:0.78rem;opacity:.7;margin-top:4px">SFC Qty</div>
+        <div style="font-size:1.1rem;font-weight:600">{TBD['sfc']:,}</div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     st.divider()
 

@@ -123,6 +123,10 @@ with _timed("Classify"):
     df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                             df["fc_qty"] / df["avg_daily_orders"], np.nan)
 
+    # TBD: in-stock days < 30 → not enough sales history
+    if "inv_days_30" in df.columns:
+        df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+
 # ── Step 4: Trigger counts — read from SQLite fc2sfc_triggers ─────────────────
 with _timed("Triggers"):
     df_mid_trigger  = DB_CACHE.read_fc2sfc_triggers("MIDDLE_EVICT")
