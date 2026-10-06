@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS fc2sfc_triggers (
 );
 CREATE INDEX IF NOT EXISTS idx_fc2sfc_triggers_type ON fc2sfc_triggers(trigger_type);
 
+CREATE TABLE IF NOT EXISTS tbd_skus (
+    item_number TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS task_list (
     list_id          TEXT NOT NULL,
     item_number      TEXT,
@@ -503,6 +507,23 @@ class CacheDB:
     def read_exp_flags(self) -> set[str]:
         with self._conn() as conn:
             rows = conn.execute("SELECT item_number FROM exp_flags").fetchall()
+        return {r[0] for r in rows}
+
+    # ── TBD SKUs (new products: first inbound <30d AND active_order_days <14) ──
+
+    def write_tbd_skus(self, items: list[str]):
+        with self._conn() as conn:
+            conn.execute("DELETE FROM tbd_skus")
+            conn.executemany("INSERT OR REPLACE INTO tbd_skus VALUES(?)",
+                             [(i,) for i in items])
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
+                ("tbd_skus", datetime.now(UTC).isoformat()),
+            )
+
+    def read_tbd_skus(self) -> set[str]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT item_number FROM tbd_skus").fetchall()
         return {r[0] for r in rows}
 
     # ── Task lists ────────────────────────────────────────────────────────────

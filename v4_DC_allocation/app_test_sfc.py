@@ -277,6 +277,10 @@ with _timed("EXP Flags"):
     df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                             df["fc_qty"] / df["avg_daily_orders"], np.nan)
 
+    # TBD: in-stock days < 30 → not enough sales history, exclude from transfer decisions
+    if "inv_days_30" in df.columns:
+        df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+
     # need_minimal_exp from SQLite (fast after first run)
     exp_items = _get_exp_flags()
     df["need_minimal_exp"] = df["item_number"].isin(exp_items).astype(int)

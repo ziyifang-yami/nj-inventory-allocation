@@ -194,6 +194,19 @@ df["seg"] = np.where((_aod >= AOD_TOP) & (_ol >= OL_TOP), "TOP",
                      np.where(_ol < OL_TAIL, "TAIL", "MIDDLE"))
 df["need_minimal_exp"] = df["item_number"].isin(exp_items).astype(int)
 
+# ── Step 4b: TBD segment — in-stock days < 30 (insufficient sales history) ────
+# If a SKU has been in stock fewer than 30 days total (inv_days_30 < 30),
+# we don't have enough data to classify it reliably → mark as TBD.
+# inv_days_30 is already in df from the Athena sales merge.
+_tbd_mask = df["inv_days_30"] < 30
+df.loc[_tbd_mask, "seg"] = "TBD"
+_n_tbd = _tbd_mask.sum()
+# Save to SQLite so apps can read it
+_final_tbd = df[df["seg"] == "TBD"]["item_number"].tolist()
+db.write_tbd_skus(_final_tbd)
+print(f"  [4b] TBD (inv_days_30 < 30): {_n_tbd:,} SKUs")
+log.append(f"tbd_skus: {_n_tbd:,}")
+
 _d2s = df["fc_d2s"].fillna(999.0)
 _has_sales = (df["avg_daily_orders"] > 0).any()
 if _has_sales:
