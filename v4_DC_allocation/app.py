@@ -376,8 +376,12 @@ def stats(seg):
     s = df[df["seg"] == seg]
     return dict(
         n=len(s),
+        n_fc=int((s["fc_qty"] > 0).sum()),
+        n_sfc=int((s["sfc_qty"] > 0).sum()),
         psku=len(s)/N*100,
         pol=s["order_lines_30d"].sum()/TOL*100 if TOL else 0,
+        pol_fc=s.loc[s["fc_qty"]>0,"order_lines_30d"].sum()/TOL*100 if TOL else 0,
+        pol_sfc=s.loc[s["sfc_qty"]>0,"order_lines_30d"].sum()/TOL*100 if TOL else 0,
         pu=s["sales_units_30d"].sum()/TU*100 if TU else 0,
         pc=s["daily_sales_cbm"].sum()/TC*100 if TC else 0,
         fc=int(s["fc_qty"].sum()),
@@ -457,64 +461,63 @@ with tab_dash:
     # ── Three charts in three equal columns ───────────────────────
     ch1, ch2, ch3 = st.columns(3)
 
-    _chart_h = 360  # enough height for labels above tallest bar
+    _chart_h = 360
+
+    def _grouped_bar(title, fc_vals, sfc_vals, fc_labels, sfc_labels, y_fmt=None):
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name="FC", x=_ALL_SEGS, y=fc_vals,
+            marker_color=_ALL_COLORS, opacity=0.9,
+            text=fc_labels, textposition="outside",
+        ))
+        fig.add_trace(go.Bar(
+            name="SFC", x=_ALL_SEGS, y=sfc_vals,
+            marker_color=_ALL_COLORS, opacity=0.45,
+            text=sfc_labels, textposition="outside",
+        ))
+        yaxis = dict(showgrid=True, gridcolor="#f0f0f0", autorange=True)
+        if y_fmt == "%":
+            yaxis["ticksuffix"] = "%"
+        else:
+            yaxis["tickformat"] = ","
+        fig.update_layout(
+            barmode="group", height=_chart_h, margin=dict(t=40,b=0,l=0,r=0),
+            title=dict(text=title, x=0, font_size=13),
+            legend=dict(orientation="h", x=1, xanchor="right", y=1.12),
+            yaxis=yaxis, xaxis=dict(showgrid=False), plot_bgcolor="white",
+        )
+        return fig
 
     with ch1:
-        fig_s = go.Figure()
-        fig_s.add_trace(go.Bar(
-            name="FC", x=_ALL_SEGS,
-            y=[d["fc"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS, opacity=0.9,
-            text=[f"{d['fc']:,}" for d in _ALL_DATA],
-            textposition="outside",
-        ))
-        fig_s.add_trace(go.Bar(
-            name="SFC", x=_ALL_SEGS,
-            y=[d["sfc"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS, opacity=0.45,
-            text=[f"{d['sfc']:,}" for d in _ALL_DATA],
-            textposition="outside",
-        ))
-        fig_s.update_layout(
-            barmode="group", height=_chart_h, margin=dict(t=40,b=0,l=0,r=0),
-            title=dict(text="FC vs SFC Qty", x=0, font_size=13),
-            legend=dict(orientation="h", x=1, xanchor="right", y=1.12),
-            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0", autorange=True),
-            xaxis=dict(showgrid=False), plot_bgcolor="white",
+        fig1 = _grouped_bar(
+            "SKU Count (FC vs SFC)",
+            fc_vals=[d["n_fc"] for d in _ALL_DATA],
+            sfc_vals=[d["n_sfc"] for d in _ALL_DATA],
+            fc_labels=[f"{d['n_fc']:,}" for d in _ALL_DATA],
+            sfc_labels=[f"{d['n_sfc']:,}" for d in _ALL_DATA],
         )
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.plotly_chart(fig1, use_container_width=True)
 
     with ch2:
-        fig_o = go.Figure(go.Bar(
-            x=[f"{seg}" for seg in _ALL_SEGS],
-            y=[d["n"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS,
-            text=[f"{d['n']:,}" for d in _ALL_DATA],
-            textposition="outside",
-        ))
-        fig_o.update_layout(
-            margin=dict(t=40,b=0,l=0,r=0), height=_chart_h,
-            title=dict(text="SKU Count", x=0, font_size=13),
-            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0", autorange=True),
-            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
+        fig2 = _grouped_bar(
+            "Order Lines % (FC vs SFC)",
+            fc_vals=[d["pol_fc"] for d in _ALL_DATA],
+            sfc_vals=[d["pol_sfc"] for d in _ALL_DATA],
+            fc_labels=[f"{d['pol_fc']:.1f}%" for d in _ALL_DATA],
+            sfc_labels=[f"{d['pol_sfc']:.1f}%" for d in _ALL_DATA],
+            y_fmt="%",
         )
-        st.plotly_chart(fig_o, use_container_width=True)
+        st.plotly_chart(fig2, use_container_width=True)
 
     with ch3:
-        fig_ol = go.Figure(go.Bar(
-            x=[f"{seg}" for seg in _ALL_SEGS],
-            y=[d["pol"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS,
-            text=[f"{d['pol']:.1f}%" for d in _ALL_DATA],
-            textposition="outside",
-        ))
-        fig_ol.update_layout(
-            margin=dict(t=40,b=0,l=0,r=0), height=_chart_h,
-            title=dict(text="Order Lines %", x=0, font_size=13),
-            yaxis=dict(ticksuffix="%", showgrid=True, gridcolor="#f0f0f0", autorange=True),
-            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
+        fig3 = _grouped_bar(
+            "Inventory Qty (FC vs SFC)",
+            fc_vals=[d["fc"] for d in _ALL_DATA],
+            sfc_vals=[d["sfc"] for d in _ALL_DATA],
+            fc_labels=[f"{d['fc']:,}" for d in _ALL_DATA],
+            sfc_labels=[f"{d['sfc']:,}" for d in _ALL_DATA],
         )
-        st.plotly_chart(fig_ol, use_container_width=True)
+        st.plotly_chart(fig3, use_container_width=True)
 
 
 
