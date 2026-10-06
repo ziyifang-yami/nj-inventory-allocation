@@ -457,65 +457,64 @@ with tab_dash:
     # ── Three charts in three equal columns ───────────────────────
     ch1, ch2, ch3 = st.columns(3)
 
+    _chart_h = 360  # enough height for labels above tallest bar
+
     with ch1:
-        seg_df = pd.DataFrame([
-            {"Tier": seg, "SKUs": d["n"]}
-            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
-        ])
-        fig_s = go.Figure(go.Bar(
-            x=seg_df["Tier"], y=seg_df["SKUs"],
-            marker_color=_ALL_COLORS,
-            text=seg_df["SKUs"].apply(lambda v: f"{v:,}"),
+        fig_s = go.Figure()
+        fig_s.add_trace(go.Bar(
+            name="FC", x=_ALL_SEGS,
+            y=[d["fc"] for d in _ALL_DATA],
+            marker_color=_ALL_COLORS, opacity=0.9,
+            text=[f"{d['fc']:,}" for d in _ALL_DATA],
+            textposition="outside",
+        ))
+        fig_s.add_trace(go.Bar(
+            name="SFC", x=_ALL_SEGS,
+            y=[d["sfc"] for d in _ALL_DATA],
+            marker_color=_ALL_COLORS, opacity=0.45,
+            text=[f"{d['sfc']:,}" for d in _ALL_DATA],
             textposition="outside",
         ))
         fig_s.update_layout(
-            margin=dict(t=40,b=0,l=0,r=0), height=300,
-            title=dict(text="SKU Count", x=0, font_size=13),
-            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
-            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
+            barmode="group", height=_chart_h, margin=dict(t=40,b=0,l=0,r=0),
+            title=dict(text="FC vs SFC Qty", x=0, font_size=13),
+            legend=dict(orientation="h", x=1, xanchor="right", y=1.12),
+            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0", autorange=True),
+            xaxis=dict(showgrid=False), plot_bgcolor="white",
         )
         st.plotly_chart(fig_s, use_container_width=True)
 
     with ch2:
-        ol_df = pd.DataFrame([
-            {"Tier": seg, "OL%": d["pol"]}
-            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
-        ])
         fig_o = go.Figure(go.Bar(
-            x=ol_df["Tier"], y=ol_df["OL%"],
+            x=[f"{seg}" for seg in _ALL_SEGS],
+            y=[d["n"] for d in _ALL_DATA],
             marker_color=_ALL_COLORS,
-            text=ol_df["OL%"].apply(lambda v: f"{v:.1f}%"),
+            text=[f"{d['n']:,}" for d in _ALL_DATA],
             textposition="outside",
         ))
         fig_o.update_layout(
-            margin=dict(t=40,b=0,l=0,r=0), height=300,
-            title=dict(text="Order Lines %", x=0, font_size=13),
-            yaxis=dict(ticksuffix="%", showgrid=True, gridcolor="#f0f0f0"),
+            margin=dict(t=40,b=0,l=0,r=0), height=_chart_h,
+            title=dict(text="SKU Count", x=0, font_size=13),
+            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0", autorange=True),
             xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
         )
         st.plotly_chart(fig_o, use_container_width=True)
 
     with ch3:
-        # FC and SFC side by side — 8 bars (4 segs × 2 zones)
-        fig_inv = go.Figure()
-        fig_inv.add_trace(go.Bar(
-            name="FC", x=_ALL_SEGS,
-            y=[d["fc"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS, opacity=0.9,
+        fig_ol = go.Figure(go.Bar(
+            x=[f"{seg}" for seg in _ALL_SEGS],
+            y=[d["pol"] for d in _ALL_DATA],
+            marker_color=_ALL_COLORS,
+            text=[f"{d['pol']:.1f}%" for d in _ALL_DATA],
+            textposition="outside",
         ))
-        fig_inv.add_trace(go.Bar(
-            name="SFC", x=_ALL_SEGS,
-            y=[d["sfc"] for d in _ALL_DATA],
-            marker_color=_ALL_COLORS, opacity=0.45,
-        ))
-        fig_inv.update_layout(
-            barmode="group", height=300, margin=dict(t=40,b=0,l=0,r=0),
-            title=dict(text="FC vs SFC Qty", x=0, font_size=13),
-            legend=dict(orientation="h", x=1, xanchor="right", y=1.15),
-            yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
-            xaxis=dict(showgrid=False), plot_bgcolor="white",
+        fig_ol.update_layout(
+            margin=dict(t=40,b=0,l=0,r=0), height=_chart_h,
+            title=dict(text="Order Lines %", x=0, font_size=13),
+            yaxis=dict(ticksuffix="%", showgrid=True, gridcolor="#f0f0f0", autorange=True),
+            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
         )
-        st.plotly_chart(fig_inv, use_container_width=True)
+        st.plotly_chart(fig_ol, use_container_width=True)
 
 
 
