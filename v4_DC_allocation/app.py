@@ -102,9 +102,10 @@ st.markdown("""
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 COLORS = {
-    "TOP":    "#5B8DEF",
-    "MIDDLE": "#F0A500",
-    "TAIL":   "#8C8C8C",
+    "TOP":    "#E57373",   # 淡红
+    "MIDDLE": "#5B8DEF",   # 蓝色
+    "TAIL":   "#F0A500",   # 黄色
+    "TBD":    "#9E9E9E",   # 灰色
 }
 TARGETS = {"SKU %": 10.2, "OL %": 70.2, "Units %": 77.7, "CBI %": 80.4}
 
@@ -449,22 +450,18 @@ with tab_dash:
 
     st.divider()
 
-    # ── Two column layout ─────────────────────────────────────────
-    left, right = st.columns([1, 1], gap="large")
-
     _ALL_SEGS   = ["TOP", "MIDDLE", "TAIL", "TBD"]
-    _ALL_COLORS = [COLORS["TOP"], COLORS["MIDDLE"], COLORS["TAIL"], "#888888"]
+    _ALL_COLORS = [COLORS[s] for s in _ALL_SEGS]
     _ALL_DATA   = [T, M, TL, TBD]
 
-# LEFT: Bar charts — SKU and OL distribution (including TBD)
-    with left:
-        st.markdown("#### SKU & OL Distribution")
+    # ── Three charts in three equal columns ───────────────────────
+    ch1, ch2, ch3 = st.columns(3)
 
+    with ch1:
         seg_df = pd.DataFrame([
-            {"Tier": seg, "SKUs": d["n"], "OL%": d["pol"]}
+            {"Tier": seg, "SKUs": d["n"]}
             for seg, d in zip(_ALL_SEGS, _ALL_DATA)
         ])
-
         fig_s = go.Figure(go.Bar(
             x=seg_df["Tier"], y=seg_df["SKUs"],
             marker_color=_ALL_COLORS,
@@ -472,44 +469,49 @@ with tab_dash:
             textposition="outside",
         ))
         fig_s.update_layout(
-            margin=dict(t=30,b=0,l=0,r=0), height=220,
-            title=dict(text="SKU Count by Segment", x=0, font_size=13),
+            margin=dict(t=40,b=0,l=0,r=0), height=300,
+            title=dict(text="SKU Count", x=0, font_size=13),
             yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
-            xaxis=dict(showgrid=False), plot_bgcolor="white",
-            showlegend=False,
+            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
         )
         st.plotly_chart(fig_s, use_container_width=True)
 
+    with ch2:
+        ol_df = pd.DataFrame([
+            {"Tier": seg, "OL%": d["pol"]}
+            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
+        ])
         fig_o = go.Figure(go.Bar(
-            x=seg_df["Tier"], y=seg_df["OL%"],
+            x=ol_df["Tier"], y=ol_df["OL%"],
             marker_color=_ALL_COLORS,
-            text=seg_df["OL%"].apply(lambda v: f"{v:.1f}%"),
+            text=ol_df["OL%"].apply(lambda v: f"{v:.1f}%"),
             textposition="outside",
         ))
         fig_o.update_layout(
-            margin=dict(t=30,b=0,l=0,r=0), height=220,
-            title=dict(text="Order Lines % by Segment", x=0, font_size=13),
+            margin=dict(t=40,b=0,l=0,r=0), height=300,
+            title=dict(text="Order Lines %", x=0, font_size=13),
             yaxis=dict(ticksuffix="%", showgrid=True, gridcolor="#f0f0f0"),
-            xaxis=dict(showgrid=False), plot_bgcolor="white",
-            showlegend=False,
+            xaxis=dict(showgrid=False), plot_bgcolor="white", showlegend=False,
         )
         st.plotly_chart(fig_o, use_container_width=True)
 
-    # RIGHT: FC vs SFC inventory chart (including TBD)
-    with right:
-        inv_df = pd.DataFrame([
-            {"Tier": seg, "FC": d["fc"], "SFC": d["sfc"]}
-            for seg, d in zip(_ALL_SEGS, _ALL_DATA)
-        ])
+    with ch3:
+        # FC and SFC side by side — 8 bars (4 segs × 2 zones)
         fig_inv = go.Figure()
-        fig_inv.add_trace(go.Bar(name="FC",  x=inv_df["Tier"], y=inv_df["FC"],
-                                 marker_color=_ALL_COLORS, opacity=.9))
-        fig_inv.add_trace(go.Bar(name="SFC", x=inv_df["Tier"], y=inv_df["SFC"],
-                                 marker_color=_ALL_COLORS, opacity=.45))
+        fig_inv.add_trace(go.Bar(
+            name="FC", x=_ALL_SEGS,
+            y=[d["fc"] for d in _ALL_DATA],
+            marker_color=_ALL_COLORS, opacity=0.9,
+        ))
+        fig_inv.add_trace(go.Bar(
+            name="SFC", x=_ALL_SEGS,
+            y=[d["sfc"] for d in _ALL_DATA],
+            marker_color=_ALL_COLORS, opacity=0.45,
+        ))
         fig_inv.update_layout(
-            barmode="stack", height=460, margin=dict(t=30,b=0,l=0,r=0),
-            title=dict(text="FC vs SFC Inventory by Segment", x=0, font_size=13),
-            legend=dict(orientation="h", x=1, xanchor="right", y=1.05),
+            barmode="group", height=300, margin=dict(t=40,b=0,l=0,r=0),
+            title=dict(text="FC vs SFC Qty", x=0, font_size=13),
+            legend=dict(orientation="h", x=1, xanchor="right", y=1.15),
             yaxis=dict(tickformat=",", showgrid=True, gridcolor="#f0f0f0"),
             xaxis=dict(showgrid=False), plot_bgcolor="white",
         )
