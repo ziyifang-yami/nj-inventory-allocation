@@ -457,10 +457,14 @@ else:
                         JOIN yamibuy_wh.wh_storage_location wsl
                             ON wsl.location_no = li.location_no
                             AND wsl.warehouse_number = li.warehouse_number
+                        LEFT JOIN yamibuy_im.im_item ii
+                            ON ii.item_number = li.item_number
                         WHERE li.warehouse_number = '002'
                           AND li.quantity > 0
                           AND wsl.location_type IN (3, 4)
                           AND wsl.zone_id != 2
+                          AND wsl.size_id NOT IN (13, 33)
+                          AND IFNULL(ii.business_type, 0) != 8
                         GROUP BY li.location_no
                     """)
                     _loc_total_skus = {r[0]: r[1] for r in _cur_lc.fetchall()}
