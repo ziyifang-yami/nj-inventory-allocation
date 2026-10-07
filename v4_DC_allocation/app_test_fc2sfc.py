@@ -55,32 +55,50 @@ with st.sidebar:
         if age_h > ttl_h: return f"⚠️ {age_h:.1f}h old (overdue)"
         return f"✅ {age_h:.1f}h ago"
 
-    st.caption("**FC→SFC Tasks** (30min TTL)")
-    st.caption(_age_badge("fc2sfc_tasks", 0.5))
+    st.caption("**Triggers** (all SKUs, 30min TTL)")
+    st.caption(_age_badge("fc2sfc_triggers", 0.5))
+    st.caption("**Tasks** (lot-level, 1h TTL)")
+    st.caption(_age_badge("fc2sfc_tasks", 1.0))
+
     if st.button("↻ FC→SFC Tasks", key="btn_fc2sfc", use_container_width=True):
-        with st.spinner("Running full refresh (~90s)..."):
+        with st.spinner("Running full refresh (~7 min for full lot query)..."):
             try:
                 import subprocess, sys as _sys
                 subprocess.run([_sys.executable, "refresh_sfc_cache.py"],
-                               cwd=_HERE, timeout=200)
+                               cwd=_HERE, timeout=600)
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed: {e}")
 
     st.divider()
     if st.button("🔄 Refresh All Data", key="btn_all", use_container_width=True, type="primary"):
-        with st.spinner("Running full refresh (~90s)..."):
+        with st.spinner("Running full refresh (~7 min)..."):
             try:
                 import subprocess, sys as _sys
                 subprocess.run([_sys.executable, "refresh_sfc_cache.py"],
-                               cwd=_HERE, timeout=200)
+                               cwd=_HERE, timeout=600)
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed: {e}")
 
-# ── Auto-refresh if overdue ───────────────────────────────────────────────────
-if DB_CACHE.age_minutes("fc2sfc_tasks") > 35:
-    st.info("⏳ FC→SFC data overdue. Cron refreshes every 30min. Use sidebar button to refresh manually.")
+# ── Auto-refresh if overdue (1h TTL for tasks) ────────────────────────────────
+_tasks_age = DB_CACHE.age_minutes("fc2sfc_tasks")
+if _tasks_age > 65:  # 1h + 5min buffer
+    try:
+        import subprocess as _sp, sys as _sys
+        _lock = Path("results/refresh.lock")
+        if _lock.exists():
+            try:
+                _pid = int(_lock.read_text().strip())
+                os.kill(_pid, 0)  # check if alive
+            except (ValueError, ProcessLookupError, PermissionError):
+                _lock.unlink(missing_ok=True)
+        if not _lock.exists():
+            _sp.Popen([_sys.executable, "refresh_sfc_cache.py"],
+                      cwd=_HERE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            st.info("⏳ FC→SFC tasks overdue (>1h). Background refresh triggered.")
+    except Exception:
+        pass
 
 # ── Timing helper ─────────────────────────────────────────────────────────────
 _timings = {}

@@ -413,9 +413,9 @@ except Exception as e:
     _mid  = pd.DataFrame()
     _tail = pd.DataFrame()
 
-# ── Step 8b: FC→SFC tasks — top-N lot-level (slow MySQL, 30-min TTL) ──────────
-if db.age_minutes("fc2sfc_tasks") < 30:
-    print("  [8b] FC→SFC tasks — cache fresh (<30min), skipping.")
+# ── Step 8b: FC→SFC tasks — lot-level (slow MySQL, 1h TTL) ───────────────────
+if db.age_minutes("fc2sfc_tasks") < 60:
+    print("  [8b] FC→SFC tasks — cache fresh (<1h), skipping.")
     log.append("fc2sfc_tasks: cache hit (skipped)")
 else:
     print(f"\n  [8b] Building FC→SFC lot-level tasks (top-N cap)...")
@@ -457,14 +457,10 @@ else:
                         JOIN yamibuy_wh.wh_storage_location wsl
                             ON wsl.location_no = li.location_no
                             AND wsl.warehouse_number = li.warehouse_number
-                        LEFT JOIN yamibuy_im.im_item ii
-                            ON ii.item_number = li.item_number
                         WHERE li.warehouse_number = '002'
                           AND li.quantity > 0
                           AND wsl.location_type IN (3, 4)
                           AND wsl.zone_id != 2
-                          AND wsl.size_id NOT IN (13, 33)
-                          AND IFNULL(ii.business_type, 0) != 8
                         GROUP BY li.location_no
                     """)
                     _loc_total_skus = {r[0]: r[1] for r in _cur_lc.fetchall()}
