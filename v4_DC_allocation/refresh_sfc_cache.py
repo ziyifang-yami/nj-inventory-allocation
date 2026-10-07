@@ -441,6 +441,34 @@ else:
             else:
                 print(f"      FC lots: {len(_df_fc_lots):,} rows")
 
+            # ── LOC_CLEAR pre-computation: query total SKU count per location ──
+            # We need to know how many SKUs are in EACH location (including
+            # SKUs NOT in the transfer list) to determine if a location can
+            # be fully vacated.
+            # This is a lightweight aggregation query — no lot detail needed.
+            _loc_total_skus: dict = {}  # location_no → total distinct SKUs
+            try:
+                _conn_lc = _connect()
+                with _conn_lc.cursor() as _cur_lc:
+                    _cur_lc.execute("""
+                        SELECT li.location_no,
+                               COUNT(DISTINCT li.item_number) AS total_skus
+                        FROM yamibuy_wh.wh_lot_inventory li
+                        JOIN yamibuy_wh.wh_storage_location wsl
+                            ON wsl.location_no = li.location_no
+                            AND wsl.warehouse_number = li.warehouse_number
+                        WHERE li.warehouse_number = '002'
+                          AND li.quantity > 0
+                          AND wsl.location_type IN (3, 4)
+                          AND wsl.zone_id != 2
+                        GROUP BY li.location_no
+                    """)
+                    _loc_total_skus = {r[0]: r[1] for r in _cur_lc.fetchall()}
+                _conn_lc.close()
+                print(f"      Location SKU counts: {len(_loc_total_skus):,} locations")
+            except Exception as _elc:
+                print(f"      Location SKU count query failed: {_elc} — LOC_CLEAR disabled")
+
             # Build location-level rows for MIDDLE EVICT
             _mid_rows = []
             if not _df_fc_lots.empty and _mid_skus:
@@ -491,18 +519,25 @@ else:
             # A location can be fully vacated when every SKU stored there is
             # also being transferred out. These get highest priority.
             _df_loc_clear = pd.DataFrame()
-            if not _df_fc_lots.empty:
-                # Group all FC lots by location to see every SKU stored there
-                _loc_all_skus = _df_fc_lots.groupby("location_no")["item_number"].apply(
-                    lambda x: set(x.astype(str))
-                )
+            if not _df_fc_lots.empty and _loc_total_skus:
+                # For each location in the transfer rows, count how many
+                # distinct transfer SKUs are there vs total SKUs in that location
                 _transfer_set = set(str(s) for s in _fc_skus)
-                # Locations where every SKU is in the transfer set
-                _clearable_locs = set(
-                    _loc_all_skus[_loc_all_skus.apply(lambda s: s.issubset(_transfer_set))].index
+
+                # Count transfer SKUs per location (from df_fc_lots — transfer SKUs only)
+                _loc_transfer_skus = (
+                    _df_fc_lots.groupby("location_no")["item_number"]
+                    .apply(lambda x: len(set(x.astype(str))))
                 )
+
+                # A location is clearable if its transfer SKU count == total SKU count
+                _clearable_locs = set(
+                    loc for loc, transfer_cnt in _loc_transfer_skus.items()
+                    if _loc_total_skus.get(loc, 0) == transfer_cnt
+                    and transfer_cnt > 0
+                )
+
                 if _clearable_locs:
-                    # Extract LOC_CLEAR rows from mid + tail
                     _mid_lc  = _df_mid_locs[_df_mid_locs["location_no"].isin(_clearable_locs)].copy()
                     _tail_lc = _df_tail_locs[_df_tail_locs["location_no"].isin(_clearable_locs)].copy()
                     for _df_ in [_mid_lc, _tail_lc]:
@@ -511,11 +546,12 @@ else:
                     if not _df_loc_clear.empty:
                         _df_loc_clear = _df_loc_clear.sort_values("location_no", ascending=True).reset_index(drop=True)
 
-                    # Remove LOC_CLEAR SKUs/locs from the original lists
+                    # Remove LOC_CLEAR locs from the original lists
                     _df_mid_locs  = _df_mid_locs[~_df_mid_locs["location_no"].isin(_clearable_locs)].copy()
                     _df_tail_locs = _df_tail_locs[~_df_tail_locs["location_no"].isin(_clearable_locs)].copy()
 
-                    print(f"      LOC_CLEAR: {_df_loc_clear['location_no'].nunique() if not _df_loc_clear.empty else 0:,} locations, {len(_df_loc_clear):,} rows")
+                    _n_lc_locs = _df_loc_clear["location_no"].nunique() if not _df_loc_clear.empty else 0
+                    print(f"      LOC_CLEAR: {_n_lc_locs:,} locations, {len(_df_loc_clear):,} rows")
 
             db.write_fc2sfc_tasks({
                 "LOC_CLEAR":    _df_loc_clear,
