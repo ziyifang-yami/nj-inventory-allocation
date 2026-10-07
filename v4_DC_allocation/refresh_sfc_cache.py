@@ -428,14 +428,11 @@ else:
         from data.loader import load_fc_lot_data as _load_fc_lots
 
         if not _mid.empty or not _tail.empty:
-            # Cap both MIDDLE and TAIL — sort by avg_daily_orders ASC (lowest velocity first)
-            _MID_CAP  = 1000
-            _TAIL_CAP = 1000
-
-            _mid_skus  = _mid.sort_values("avg_daily_orders",  ascending=True)["item_number"].tolist()[:_MID_CAP]  if not _mid.empty  else []
-            _tail_skus = _tail.sort_values("avg_daily_orders", ascending=True)["item_number"].tolist()[:_TAIL_CAP] if not _tail.empty else []
+            # No cap — query all triggered SKUs for full lot-level tasks
+            _mid_skus  = _mid.sort_values("avg_daily_orders", ascending=True)["item_number"].tolist() if not _mid.empty else []
+            _tail_skus = _tail.sort_values("avg_daily_orders", ascending=True)["item_number"].tolist() if not _tail.empty else []
             _fc_skus   = list(set(_mid_skus + _tail_skus))
-            print(f"      MIDDLE {len(_mid):,}→capped {len(_mid_skus):,}, TAIL {len(_tail):,}→capped {len(_tail_skus):,} → {len(_fc_skus):,} unique SKUs")
+            print(f"      MIDDLE {len(_mid_skus):,} + TAIL {len(_tail_skus):,} → {len(_fc_skus):,} unique SKUs (no cap)")
 
             _df_fc_lots, _fc_err = _load_fc_lots(_fc_skus)
             if _fc_err:
@@ -490,14 +487,45 @@ else:
             if not _df_tail_locs.empty and "location_no" in _df_tail_locs.columns:
                 _df_tail_locs = _df_tail_locs.sort_values("location_no", ascending=True).reset_index(drop=True)
 
+            # ── LOC_CLEAR: locations where ALL SKUs are in the transfer set ────
+            # A location can be fully vacated when every SKU stored there is
+            # also being transferred out. These get highest priority.
+            _df_loc_clear = pd.DataFrame()
+            if not _df_fc_lots.empty:
+                # Group all FC lots by location to see every SKU stored there
+                _loc_all_skus = _df_fc_lots.groupby("location_no")["item_number"].apply(
+                    lambda x: set(x.astype(str))
+                )
+                _transfer_set = set(str(s) for s in _fc_skus)
+                # Locations where every SKU is in the transfer set
+                _clearable_locs = set(
+                    _loc_all_skus[_loc_all_skus.apply(lambda s: s.issubset(_transfer_set))].index
+                )
+                if _clearable_locs:
+                    # Extract LOC_CLEAR rows from mid + tail
+                    _mid_lc  = _df_mid_locs[_df_mid_locs["location_no"].isin(_clearable_locs)].copy()
+                    _tail_lc = _df_tail_locs[_df_tail_locs["location_no"].isin(_clearable_locs)].copy()
+                    for _df_ in [_mid_lc, _tail_lc]:
+                        _df_["rule"] = "LOC_CLEAR"
+                    _df_loc_clear = pd.concat([_mid_lc, _tail_lc], ignore_index=True)
+                    if not _df_loc_clear.empty:
+                        _df_loc_clear = _df_loc_clear.sort_values("location_no", ascending=True).reset_index(drop=True)
+
+                    # Remove LOC_CLEAR SKUs/locs from the original lists
+                    _df_mid_locs  = _df_mid_locs[~_df_mid_locs["location_no"].isin(_clearable_locs)].copy()
+                    _df_tail_locs = _df_tail_locs[~_df_tail_locs["location_no"].isin(_clearable_locs)].copy()
+
+                    print(f"      LOC_CLEAR: {_df_loc_clear['location_no'].nunique() if not _df_loc_clear.empty else 0:,} locations, {len(_df_loc_clear):,} rows")
+
             db.write_fc2sfc_tasks({
+                "LOC_CLEAR":    _df_loc_clear,
                 "MIDDLE_EVICT": _df_mid_locs,
                 "TAIL_CLEAR":   _df_tail_locs,
             })
             elapsed = time.perf_counter() - t0
             print(f"      MIDDLE_EVICT: {len(_df_mid_locs):,} rows")
             print(f"      TAIL_CLEAR:   {len(_df_tail_locs):,} rows  ({elapsed:.1f}s)")
-            log.append(f"fc2sfc_tasks: MIDDLE={len(_df_mid_locs):,} TAIL={len(_df_tail_locs):,} in {elapsed:.1f}s")
+            log.append(f"fc2sfc_tasks: LOC_CLEAR={len(_df_loc_clear):,} MIDDLE={len(_df_mid_locs):,} TAIL={len(_df_tail_locs):,} in {elapsed:.1f}s")
         else:
             print("      No triggers — skipping lot query")
             log.append("fc2sfc_tasks: no triggers")

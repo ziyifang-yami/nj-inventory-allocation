@@ -134,6 +134,7 @@ with _timed("Triggers"):
 
 # ── Step 5: Read location-level task lists from SQLite ────────────────────────
 with _timed("FC→SFC Tasks"):
+    df_loc_clear = DB_CACHE.read_fc2sfc_task("LOC_CLEAR")
     df_mid_locs  = DB_CACHE.read_fc2sfc_task("MIDDLE_EVICT")
     df_tail_locs = DB_CACHE.read_fc2sfc_task("TAIL_CLEAR")
 
@@ -266,34 +267,35 @@ def _render_tab(tdf, key, label):
                 if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                     st.session_state[f"page_{key}"] = _page + 1; st.rerun()
 
-# ── Tabs — TAIL first (clear work), then MIDDLE (evict) ──────────────────────
-tab_tail, tab_mid = st.tabs([
+# ── Tabs — LOC_CLEAR first (highest priority), then TAIL, then MIDDLE ─────────
+tab_loc, tab_tail, tab_mid = st.tabs([
+    f"🏷️ LOC Clear — Vacate Location  ({len(df_loc_clear):,} rows)",
     f"🗑️ TAIL Clear — FC→SFC  ({len(df_tail_locs):,} rows)",
     f"📤 MIDDLE Evict — FC→SFC  ({len(df_mid_locs):,} rows)",
 ])
 
+with tab_loc:
+    _n_loc_skus = df_loc_clear["item_number"].nunique() if not df_loc_clear.empty else 0
+    _n_loc_locs = df_loc_clear["location_no"].nunique() if not df_loc_clear.empty else 0
+    st.caption(
+        f"**Highest priority.** Locations where ALL SKUs are being transferred out — "
+        f"clearing these frees up entire locations.  "
+        f"**{_n_loc_locs:,} locations · {_n_loc_skus:,} SKUs** (MIDDLE + TAIL combined)"
+    )
+    _render_tab(df_loc_clear, "loc_clear", "LOC Clear")
+
 with tab_tail:
     _n_tail_total = len(df_tail_trigger) if not df_tail_trigger.empty else 0
-    _n_tail_cap   = df_tail_locs["item_number"].nunique() if not df_tail_locs.empty else 0
-    if _n_tail_total > _n_tail_cap:
-        st.caption(
-            f"TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.  "
-            f"**Showing top {_n_tail_cap:,} of {_n_tail_total:,} total SKUs** (sorted by avg daily orders ↑ — lowest velocity first)."
-        )
-    else:
-        st.caption("TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC.")
+    _n_tail_tasks = df_tail_locs["item_number"].nunique() if not df_tail_locs.empty else 0
+    st.caption(f"TAIL SKUs (OL < 8) with FC stock. Full clear — move all FC lots to SFC. "
+               f"LOC_CLEAR SKUs excluded.  "
+               f"**{_n_tail_total:,} total triggered · {_n_tail_tasks:,} remaining SKUs**")
     _render_tab(df_tail_locs, "tail_clear", "TAIL Clear")
 
 with tab_mid:
     _n_mid_total = len(df_mid_trigger) if not df_mid_trigger.empty else 0
-    _n_mid_cap   = df_mid_locs["item_number"].nunique() if not df_mid_locs.empty else 0
-    if _n_mid_total > _n_mid_cap:
-        st.caption(
-            f"SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
-            f"Single-location SKUs are not transferred (Keep In FC rule).  "
-            f"**Showing top {_n_mid_cap:,} of {_n_mid_total:,} total SKUs** (sorted by avg daily orders ↑ — lowest velocity first)."
-        )
-    else:
-        st.caption("SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
-                   "Single-location SKUs are not transferred (Keep In FC rule).")
+    _n_mid_tasks = df_mid_locs["item_number"].nunique() if not df_mid_locs.empty else 0
+    st.caption(f"SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. "
+               f"LOC_CLEAR SKUs excluded.  "
+               f"**{_n_mid_total:,} total triggered · {_n_mid_tasks:,} remaining SKUs**")
     _render_tab(df_mid_locs, "middle_evict", "MIDDLE Evict")
