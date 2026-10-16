@@ -1,163 +1,164 @@
-# NJ Inventory Allocation — v4
+# NJ 库存分配系统 — v4
 
-Dual-warehouse inventory management dashboard for NJ Distribution Center (FC ↔ SFC).  
-Runs as three Streamlit apps on the server + one FastAPI putaway guide.
+NJ 仓库双仓库存管理系统（FC ↔ SFC），提供实时库存转移计划与上架决策。  
+以三个 Streamlit 应用 + 一个 FastAPI 上架指引形式运行在服务器上。
 
-**Live apps:**
+**运行中的应用：**
 
-| Port | File | Description |
-|------|------|-------------|
-| 8508 | `app.py` | Main dashboard (Overview, Before/After, FC→SFC, SFC→FC, Putaway) |
-| 8512 | `app_test_sfc.py` | SFC→FC task list — test/debug view |
-| 8513 | `app_test_fc2sfc.py` | FC→SFC task list — test/debug view |
-| 8504 | (warehouse-recommendation repo) | Putaway Guide — scan BT/GT barcode |
+| 端口 | 文件 | 描述 |
+|------|------|------|
+| 8508 | `app.py` | 主看板（总览 · 前后对比 · FC→SFC · SFC→FC · 上架） |
+| 8512 | `app_test_sfc.py` | SFC→FC 任务列表（测试视图） |
+| 8513 | `app_test_fc2sfc.py` | FC→SFC 任务列表（测试视图） |
+| 8504 | warehouse-recommendation 仓库 | 上架指引 — 扫 BT/GT 条码 |
 
 ---
 
-## Quick Start
+## 快速开始
 
 ```bash
-# 1. Install dependencies
+# 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. Configure credentials
+# 2. 配置凭据
 cp .env.example .env
-# Edit .env: MYSQL_HOST, MYSQL_USER, MYSQL_PASS, AWS_PROFILE (for Athena)
+# 编辑 .env，填入 MYSQL_HOST / MYSQL_USER / MYSQL_PASS / AWS 配置
 
-# 3. Run the main dashboard
+# 3. 启动主看板
 streamlit run app.py --server.port 8508
 
-# 4. Build / refresh the cache (also runs automatically every 30 min via cron)
+# 4. 构建/刷新缓存（服务器上每 30 分钟由 cron 自动运行）
 python refresh_sfc_cache.py
 ```
 
 ---
 
-## Repository Structure
+## 目录结构
 
 ```
 nj-inventory-allocation/
 │
-├── app.py                   Main Streamlit dashboard (port 8508)
-├── app_test_sfc.py          SFC→FC test view (port 8512)
-├── app_test_fc2sfc.py       FC→SFC test view (port 8513)
-├── cache_db.py              SQLite cache layer — all reads/writes to sfc_cache.db
-├── config.py                All tunable thresholds (P dict)
-├── refresh_sfc_cache.py     Cron job — rebuilds sfc_cache.db every 30 min
-├── requirements.txt         Python dependencies
+├── app.py                   主 Streamlit 看板（端口 8508）
+├── app_test_sfc.py          SFC→FC 测试视图（端口 8512）
+├── app_test_fc2sfc.py       FC→SFC 测试视图（端口 8513）
+├── cache_db.py              SQLite 缓存层 — 所有对 sfc_cache.db 的读写
+├── config.py                所有可调参数（P 字典）
+├── refresh_sfc_cache.py     定时任务 — 每 30 分钟重建 sfc_cache.db
+├── requirements.txt         Python 依赖
 │
-├── logic/                   Core business logic
-│   ├── fc_to_sfc.py         FC→SFC: MIDDLE evict, TAIL clear, LOC_CLEAR selection
-│   ├── sfc_to_fc.py         SFC→FC: T1/T2/T3/T4 task list builder
-│   ├── putaway.py           Putaway decision engine (TBD/TOP/MIDDLE/TAIL)
-│   └── classify.py          SKU segment classification helpers
+├── logic/                   核心业务逻辑
+│   ├── fc_to_sfc.py         FC→SFC：MIDDLE 超储清出、TAIL 全量清仓、LOC_CLEAR 选库位
+│   ├── sfc_to_fc.py         SFC→FC：T1/T2/T3/T4 任务列表构建
+│   ├── putaway.py           上架决策引擎（TBD/TOP/MIDDLE/TAIL）
+│   └── classify.py          SKU 分段分类辅助函数
 │
 ├── data/
-│   └── loader.py            All MySQL + Athena queries (inventory, lots, sales, exp)
+│   └── loader.py            所有 MySQL + Athena 查询（库存、批次、销量、到期日）
 │
 ├── planning/
-│   ├── ideal.py             Ideal inventory state calculator
-│   └── schedule.py          30-day rolling schedule
+│   ├── ideal.py             理想库存状态计算
+│   └── schedule.py          30 天滚动排程
 │
-├── tests/                   Unit + property-based tests (pytest + Hypothesis)
-│   ├── test_classify_*.py   Segment classification tests
-│   ├── test_fc_to_sfc_*.py  FC→SFC logic tests
-│   ├── test_sfc_to_fc_*.py  SFC→FC logic tests
-│   ├── test_putaway_*.py    Putaway decision tests
-│   └── test_loader.py       Data loader tests
+├── tests/                   单元测试 + 基于属性的测试（pytest + Hypothesis）
+│   ├── test_classify_*.py   分段分类测试
+│   ├── test_fc_to_sfc_*.py  FC→SFC 逻辑测试
+│   ├── test_sfc_to_fc_*.py  SFC→FC 逻辑测试
+│   ├── test_putaway_*.py    上架决策测试
+│   └── test_loader.py       数据加载测试
 │
-├── docs/                    Documentation
-│   ├── LOGIC.md             ← START HERE: segment logic, data sources, transfer rules
-│   ├── design.md            Detailed design spec (Chinese): glossary, DB fields, properties
-│   └── ui-layout-guide.md   Dashboard UI layout reference
+├── docs/                    文档
+│   ├── LOGIC.md             ← 从这里开始：分段逻辑、数据源、转移规则
+│   ├── design.md            详细设计规范（中文）：术语表、数据库字段、属性测试
+│   └── ui-layout-guide.md   看板 UI 布局参考
 │
-├── scripts/                 One-off debug / deploy / diagnostic scripts (not production)
-│   ├── deploy_*.py          Deploy scripts for uploading to server
-│   ├── check_*.py           Data validation scripts
-│   ├── debug_*.py           Debugging scripts
-│   └── *.sh                 Shell helpers
+├── scripts/                 一次性调试/部署/诊断脚本（非生产代码）
+│   ├── deploy_*.py          服务器部署脚本
+│   ├── check_*.py           数据验证脚本
+│   ├── debug_*.py           调试脚本
+│   └── *.sh                 Shell 工具脚本
 │
-└── results/                 Runtime output (gitignored except .gitkeep)
-    ├── sfc_cache.db         SQLite cache — rebuilt by refresh_sfc_cache.py
-    └── athena_cache.csv     Athena sales data cache (12h TTL)
+└── results/                 运行时输出（.gitignore 已忽略，保留 .gitkeep）
+    ├── sfc_cache.db         SQLite 缓存 — 由 refresh_sfc_cache.py 重建
+    └── athena_cache.csv     Athena 销量数据缓存（12 小时 TTL）
 ```
 
 ---
 
-## Key Concepts
+## 核心概念
 
-### Segment Classification
+### SKU 分段分类
 
-| Segment | Condition | Transfer behavior |
-|---------|-----------|-------------------|
-| **TBD** | `inv_days_30 < 30` or no Athena data | No transfers — hold until classified |
-| **TOP** | `active_order_days ≥ 21` AND `order_lines_30d ≥ 100` | All SFC → FC always |
-| **TAIL** | `order_lines_30d < 4` | All FC → SFC (full clear) |
-| **MIDDLE** | Everything else | D2S-driven bidirectional transfers |
+| 分段 | 判定条件 | 转移行为 |
+|------|----------|----------|
+| **TBD** | `inv_days_30 < 30` 或无 Athena 数据 | 不转移 — 等待下次分类 |
+| **TOP** | `active_order_days ≥ 21` 且 `order_lines_30d ≥ 100` | SFC 全量 → FC |
+| **TAIL** | `order_lines_30d < 4` | FC 全量 → SFC（清仓） |
+| **MIDDLE** | 其余 | 按 D2S 双向转移 |
 
-> ⚠️ Thresholds in `refresh_sfc_cache.py` are hardcoded (`OL_TOP=100, OL_TAIL=4`).  
-> `config.py` values (`ol_top=30, ol_tail=8`) are used by the UI simulator only.
+> ⚠️ `refresh_sfc_cache.py` 中阈值为硬编码（`OL_TOP=100, OL_TAIL=4`）。  
+> `config.py` 中的值（`ol_top=30, ol_tail=8`）仅供 UI 模拟器使用。
 
-### FC D2S (Days-to-Sell)
+### FC 库存天数（D2S）
 ```
 fc_d2s = fc_qty / avg_daily_orders
 ```
 
-### Transfer Triggers
-| Direction | Trigger | Rule |
-|-----------|---------|------|
-| FC → SFC | MIDDLE: `fc_d2s > 30d` | Transfer newest lots to SFC, keep oldest in FC |
-| FC → SFC | TAIL: `fc_qty > 0` | Full clear |
-| SFC → FC | TOP: `sfc_qty > 0` | All SFC → FC |
-| SFC → FC | MIDDLE: `fc_d2s < 14d` | Replenish FC to 28d target |
-| SFC → FC | MIDDLE: `fc_d2s < 3d` | Emergency T1 |
+### 转移触发条件
 
-### Cache Refresh Cycle
+| 方向 | 触发 | 规则 |
+|------|------|------|
+| FC → SFC | MIDDLE: `fc_d2s > 30d` | 转出最新批次到 SFC，保留最老批次在 FC（FIFO） |
+| FC → SFC | TAIL: `fc_qty > 0` | 全量清仓 |
+| SFC → FC | TOP: `sfc_qty > 0` | SFC 全量 → FC |
+| SFC → FC | MIDDLE: `fc_d2s < 14d` | 补货至目标 28d |
+| SFC → FC | MIDDLE: `fc_d2s < 3d` | 紧急 T1 补货 |
 
-`refresh_sfc_cache.py` runs every 30 min:
+### 缓存刷新流程
+
+`refresh_sfc_cache.py` 每 30 分钟运行一次：
 
 ```
-[1] Inventory (MySQL, live)
-[2] Sales data (Athena, 12h TTL)
-[3] EXP flags (MySQL, 12h TTL)
-[4] Segment classification → SQLite
-[5] SFC lot data (MySQL, live)
-[6] FC expiry summary (MySQL, 1h TTL)
-[7] Build T1-T4 task lists → SQLite
-[8] FC→SFC tasks (MySQL, 1h TTL)
-[9] Pending putaway (MySQL, 30min TTL)
+[1] 库存数据（MySQL，实时）
+[2] 销量数据（Athena，12 小时 TTL）
+[3] 保质期标记（MySQL，12 小时 TTL）
+[4] SKU 分段分类 → SQLite
+[5] SFC 批次数据（MySQL，实时）
+[6] FC 到期日汇总（MySQL，1 小时 TTL）
+[7] 构建 T1-T4 任务列表 → SQLite
+[8] FC→SFC 任务（MySQL，1 小时 TTL）
+[9] 待上架数据（MySQL，30 分钟 TTL）
 ```
 
 ---
 
-## Configuration (`config.py`)
+## 配置参数（`config.py`）
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `mid_evict_d2s` | 30 | MIDDLE FC→SFC trigger (fc_d2s above this) |
-| `mid_evict_buffer_d2s` | 3 | FC can drop to keep_d2s−3 after transfer |
-| `mid_target_d2s` | 28 | SFC→FC replenishment target |
-| `mid_emergency_d2s` | 3 | T1 emergency trigger |
-| `mid_replen_d2s` | 14 | T2 routine trigger |
-| `putaway_d2s` | 30 | Putaway MIDDLE threshold |
-| `top_trigger_d2s` | 28 | TOP SFC→FC trigger |
-
----
-
-## Documentation
-
-| File | Contents |
-|------|----------|
-| `docs/LOGIC.md` | **Operational reference** — segment logic, all data sources, transfer rules, putaway decision tree, file map. Start here. |
-| `docs/design.md` | **Design specification (Chinese)** — full glossary, DB field validation, correctness properties, test strategy |
-| `docs/ui-layout-guide.md` | Dashboard UI layout guide |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `mid_evict_d2s` | 30 | MIDDLE FC→SFC 触发线（fc_d2s 超过此值触发） |
+| `mid_evict_buffer_d2s` | 3 | 转移后 FC 可降至 keep_d2s−3 |
+| `mid_target_d2s` | 28 | SFC→FC 补货目标 D2S |
+| `mid_emergency_d2s` | 3 | T1 紧急触发线 |
+| `mid_replen_d2s` | 14 | T2 常规触发线 |
+| `putaway_d2s` | 30 | 上架 MIDDLE 判断 FC 是否充足的阈值 |
+| `top_trigger_d2s` | 28 | TOP SFC→FC 触发线 |
 
 ---
 
-## Branch History
+## 文档说明
 
-| Branch | Description |
-|--------|-------------|
-| `master` | Production (v4 DC Allocation) |
-| `archive/legacy-v1-v3` | v1 BU segment · v2 Sales tier · v3 FC segment · Zone 2 SFC orders |
-| `feature/v4-dc-allocation` | v4 development history |
+| 文件 | 内容 |
+|------|------|
+| `docs/LOGIC.md` | **运营参考** — 分段逻辑、所有数据源、转移规则、上架决策树、文件地图。从这里开始看。 |
+| `docs/design.md` | **设计规范（中文）** — 完整术语表、数据库字段验证、正确性属性、测试策略 |
+| `docs/ui-layout-guide.md` | 看板 UI 布局指南 |
+
+---
+
+## 分支说明
+
+| 分支 | 内容 |
+|------|------|
+| `master` | 生产版本（v4 DC 分配系统） |
+| `archive/legacy-v1-v3` | 旧版存档：v1 BU 分段 · v2 销售层级 · v3 FC 分段 · Zone 2 SFC 订单 |
+| `feature/v4-dc-allocation` | v4 开发历史 |
