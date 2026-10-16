@@ -152,8 +152,6 @@ excess_qty = fc_qty - min_keep              # max transferable
   - `inv_age_days ASC` = newest stock first → newest goes to SFC, oldest stays in FC (FIFO at FC)
 - Greedy selection until cumulative qty ≥ excess_qty
 
----
-
 ### 4b. SFC→FC (replenishment)
 
 **Code:** `logic/sfc_to_fc.py` · `refresh_sfc_cache.py` Steps 5-7
@@ -182,6 +180,17 @@ needed = avg_daily_orders × target_d2s(28) - fc_qty
 if sfc_total ≤ needed → take all
 else → greedy whole-location until cumulative ≥ needed
 ```
+
+**Location selection sort for T1/T2 (MIDDLE and TOP):**
+
+| Segment | Has expiry | Sort order |
+|---------|-----------|------------|
+| MIDDLE T1/T2 | Yes | `exp_date ASC` → `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
+| MIDDLE T1/T2 | No | `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
+| TOP | Yes | `exp_date ASC` → `inv_age_days DESC` → `qty DESC` |
+| TOP | No | `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
+
+`inv_age_days DESC` = oldest SFC stock first → oldest goes back to FC first (FIFO)
 
 ---
 
@@ -295,7 +304,8 @@ nj-inventory-allocation/
 | Decision | Rationale |
 |----------|-----------|
 | Location-level GROUP BY (not lot-level) | One row per location prevents duplicate transfer tasks for same location |
-| `inv_age_days ASC` for FC→SFC | Newest stock goes to SFC; oldest stays in FC for FIFO outbound |
+| FC→SFC: `inv_age_days ASC` (newest first) | Newest stock goes to SFC; oldest stays in FC for FIFO outbound |
+| SFC→FC: `inv_age_days DESC` (oldest first) | Oldest SFC stock returns to FC first; ensures FIFO across the dual-warehouse cycle |
 | `zone_id != 2` = FC (not `zone_id = 1`) | Covers all non-SFC zones including transit/overflow |
 | TBD excludes from all transfers | Insufficient data — hold until next Athena cycle classifies it |
 | 3-day buffer on FC eviction | Avoids immediate re-transfer after eviction; keeps D2S between 27-30d |

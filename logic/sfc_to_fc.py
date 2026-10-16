@@ -289,13 +289,24 @@ def select_middle_sfc_locations(
         lots["_sort_key"] = 0  # stock only
 
     if need_exp and "exp_date" in lots.columns:
+        # FEFO first, then: Stock<Bin, oldest SFC first (inv_age DESC), largest qty
+        sort_cols = ["exp_date", "_sort_key"]
+        sort_asc  = [True, True]
+        if "inv_age_days" in lots.columns:
+            sort_cols.append("inv_age_days"); sort_asc.append(False)  # oldest first → transfer to FC
+        sort_cols.append("qty"); sort_asc.append(False)
         lots = lots.sort_values(
-            ["exp_date", "_sort_key", "qty"],
-            ascending=[True, True, False], na_position="last"
+            sort_cols, ascending=sort_asc, na_position="last"
         ).drop(columns=["_sort_key"]).reset_index(drop=True)
     else:
+        # Stock<Bin, oldest SFC first (inv_age DESC), largest qty
+        sort_cols = ["_sort_key"]
+        sort_asc  = [True]
+        if "inv_age_days" in lots.columns:
+            sort_cols.append("inv_age_days"); sort_asc.append(False)  # oldest first → transfer to FC
+        sort_cols.append("qty"); sort_asc.append(False)
         lots = lots.sort_values(
-            ["_sort_key", "qty"], ascending=[True, False]
+            sort_cols, ascending=sort_asc
         ).drop(columns=["_sort_key"]).reset_index(drop=True)
 
     # Greedy: pick whole locations until cumulative qty >= needed
@@ -586,12 +597,21 @@ def build_sfc_to_fc_lists(
         # FEFO sort within ok lots when EXP SKU — earliest exp first, then qty DESC
         # Non-EXP: Stock before Bin (Stock=0, Bin=1), then qty DESC within each type
         if need_exp and "exp_date" in ok.columns:
-            ok = ok.sort_values(
-                ["exp_date", "qty"], ascending=[True, False], na_position="last"
-            ).reset_index(drop=True)
+            # FEFO first, then oldest SFC first, then qty DESC
+            sort_cols = ["exp_date"]
+            sort_asc  = [True]
+            if "inv_age_days" in ok.columns:
+                sort_cols.append("inv_age_days"); sort_asc.append(False)
+            sort_cols.append("qty"); sort_asc.append(False)
+            ok = ok.sort_values(sort_cols, ascending=sort_asc, na_position="last").reset_index(drop=True)
         else:
             ok["_loc_order"] = ok["loc_type"].map({"Stock": 0, "Bin": 1}).fillna(1)
-            ok = ok.sort_values(["_loc_order", "qty"], ascending=[True, False]).drop(columns=["_loc_order"]).reset_index(drop=True)
+            sort_cols = ["_loc_order"]
+            sort_asc  = [True]
+            if "inv_age_days" in ok.columns:
+                sort_cols.append("inv_age_days"); sort_asc.append(False)  # oldest SFC first
+            sort_cols.append("qty"); sort_asc.append(False)
+            ok = ok.sort_values(sort_cols, ascending=sort_asc).drop(columns=["_loc_order"]).reset_index(drop=True)
 
         if fc_d2s_val < 3:
             # T1: greedy whole-location selection until we have enough
