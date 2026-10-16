@@ -33,10 +33,13 @@
 
 ### 1b. AWS Athena (12-hour cache → `results/athena_cache.csv`)
 
-| Database | Table | Fields Used |
-|----------|-------|-------------|
-| `yamibuy_inventory` | `inventory_record` | `inv_days_30` — days SKU had stock in last 30d |
-| `dwb_trade` | `trade_item_sale_agg_daily` | `active_order_days`, `order_lines_30d`, `avg_daily_orders`, `sales_units_30d` |
+| Database | Table | Fields Used | History |
+|----------|-------|-------------|---------|
+| `yamibuy_inventory` | `inventory_record` | `inv_days_30` — days SKU had stock in last 30d | From **2018-01-06** |
+| `dwb_trade` | `trade_item_sale_agg_daily` | `active_order_days`, `order_lines_30d`, `avg_daily_orders`, `sales_units_30d` | From **2017-10-12** |
+
+> Both tables cover NJ warehouse 002 only, filtered to item_number starting with `1%` or `5%`.  
+> Verified 2026-10-16: `inventory_record` has 270,563 distinct SKUs across 3,200 days; `trade_item_sale_agg_daily` has 130,533 SKUs across 2,299 days.
 
 **Athena query logic:**
 - `inv_days_30`: count of distinct inventory dates where `available_qty > 0` in past 30 days
@@ -103,6 +106,8 @@ tbd_mask = inv_days_30 is NaN
 if tbd_mask:
     seg = "TBD"  # overrides TOP/MIDDLE/TAIL
 ```
+
+> **Practical implication:** Since `inventory_record` goes back to 2018, any SKU with at least 30 historical in-stock days will have `inv_days_30 = 30` and be classifiable. Only genuinely new products (first inbound < 30 in-stock days ago) will be TBD.
 
 ### Segment Summary Table
 
