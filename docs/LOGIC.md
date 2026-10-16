@@ -165,8 +165,8 @@ excess_qty = fc_qty - min_keep              # max transferable
 **Location selection (MIDDLE EVICT):**
 - Only whole locations (no partial splits)
 - Only locations where `loc_qty ≤ excess_qty`
-- **Has expiry:** `exp_date ASC` → `Stock < Bin` → `inv_age_days ASC` → `qty DESC`
-- **No expiry:** `Stock < Bin` → `inv_age_days ASC` → `qty DESC`
+- **Has expiry:** `exp_date ASC` → `Stock first, then Bin` → `inv_age_days ASC` → `qty DESC`
+- **No expiry:** `Stock first, then Bin` → `inv_age_days ASC` → `qty DESC`
   - `inv_age_days ASC` = newest stock first → newest goes to SFC, oldest stays in FC (FIFO at FC)
 - Greedy selection until cumulative qty ≥ excess_qty
 
@@ -203,10 +203,10 @@ else → greedy whole-location until cumulative ≥ needed
 
 | Segment | Has expiry | Sort order |
 |---------|-----------|------------|
-| MIDDLE T1/T2 | Yes | `exp_date ASC` → `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
-| MIDDLE T1/T2 | No | `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
+| MIDDLE T1/T2 | Yes | `exp_date ASC` → `Stock first, then Bin` → `inv_age_days DESC` → `qty DESC` |
+| MIDDLE T1/T2 | No | `Stock first, then Bin` → `inv_age_days DESC` → `qty DESC` |
 | TOP | Yes | `exp_date ASC` → `inv_age_days DESC` → `qty DESC` |
-| TOP | No | `Stock < Bin` → `inv_age_days DESC` → `qty DESC` |
+| TOP | No | `Stock first, then Bin` → `inv_age_days DESC` → `qty DESC` |
 
 `inv_age_days DESC` = oldest SFC stock first → oldest goes back to FC first (FIFO)
 
