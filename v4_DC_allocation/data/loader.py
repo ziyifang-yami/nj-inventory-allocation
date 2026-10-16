@@ -453,15 +453,22 @@ def load_fc_lot_data(skus: list[str]):
                 li.location_no,
                 CASE WHEN wsl.location_type = 4 THEN 'Bin'
                      WHEN wsl.location_type = 3 THEN 'Stock' END     AS loc_type,
+                wsl.size_id                                            AS size_id,
+                CONCAT(COALESCE(wls.description,''),
+                       '_',
+                       REPLACE(COALESCE(wls.storage_type,''), ' ', ''),
+                       '(',
+                       CAST(wsl.size_id AS CHAR),
+                       ')')                                            AS loc_size,
                 SUM(li.quantity)                                       AS qty,
                 MAX(CASE WHEN ib.qc_ExpiredDate > 0
                          THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate))
                     END)                                               AS exp_date,
                 CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
-                    CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
-                         THEN NULLIF(ib.in_dtm, 0)
-                         ELSE NULLIF(lm.receive_time, 0)
-                    END
+                    MIN(CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
+                             THEN NULLIF(ib.in_dtm, 0)
+                             ELSE NULLIF(lm.receive_time, 0)
+                        END)
                 ))) AS SIGNED)                                         AS inv_age_days,
                 CASE WHEN wis.spec IS NULL OR wis.spec = '' THEN 1
                      ELSE CAST(wis.spec AS UNSIGNED)
@@ -471,6 +478,8 @@ def load_fc_lot_data(skus: list[str]):
             JOIN yamibuy_wh.wh_storage_location wsl
                 ON  wsl.location_no      = li.location_no
                 AND wsl.warehouse_number = li.warehouse_number
+            LEFT JOIN yamibuy_wh.wh_location_size wls
+                ON  wls.size_id = wsl.size_id
             LEFT JOIN yamibuy_wh.wh_lot_master lm
                 ON  lm.lot_id = li.lot_id
             LEFT JOIN yamibuy_wh.wh_inbound_batch ib
@@ -485,8 +494,8 @@ def load_fc_lot_data(skus: list[str]):
               AND wsl.location_type IN (3, 4)
               AND wsl.zone_id != 2
               AND li.item_number IN ({ph})
-            GROUP BY li.item_number, li.location_no, wsl.location_type,
-                     lm.lot_id, lm.receive_time, wis.spec
+            GROUP BY li.item_number, li.location_no, wsl.location_type, wsl.size_id,
+                     wls.storage_type, wls.description, wis.spec
             HAVING SUM(li.quantity) > 0
         """
 
@@ -941,10 +950,10 @@ def load_sfc_lot_data_all():
                      THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate))
                 END)                                               AS exp_date,
             CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
-                CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
-                     THEN NULLIF(ib.in_dtm, 0)
-                     ELSE NULLIF(lm.receive_time, 0)
-                END
+                MIN(CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
+                         THEN NULLIF(ib.in_dtm, 0)
+                         ELSE NULLIF(lm.receive_time, 0)
+                    END)
             ))) AS SIGNED)                                         AS inv_age_days,
             CASE WHEN wis.spec IS NULL OR wis.spec = '' THEN 1
                  ELSE CAST(wis.spec AS UNSIGNED)
@@ -967,8 +976,7 @@ def load_sfc_lot_data_all():
             ON  iie.item_number = li.item_number
         WHERE li.warehouse_number = '002'
           AND li.quantity > 0
-        GROUP BY li.item_number, li.location_no, wsl.location_type,
-                 lm.lot_id, lm.receive_time, wis.spec
+        GROUP BY li.item_number, li.location_no, wsl.location_type, wis.spec
         HAVING SUM(li.quantity) > 0
     """
 
@@ -1088,6 +1096,29 @@ def load_pending_putaway():
         except Exception:
             # PO reference is nice-to-have; don't fail the whole tab
             df["po_reference"] = None
+
+        # ── Q3: Get BT / GT from wh_inbound_batch (most recent per item) ─────
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    SELECT
+                        item_number,
+                        CONCAT('BT', rec_Id)  AS bt_number,
+                        group_batch_id        AS gt_number
+                    FROM yamibuy_wh.wh_inbound_batch
+                    WHERE item_number IN ({ph})
+                    ORDER BY in_dtm DESC
+                """, item_list)
+                bt_cols = [d[0] for d in cur.description]
+                bt_rows = cur.fetchall()
+            df_bt = pd.DataFrame(bt_rows, columns=bt_cols)
+            df_bt["item_number"] = df_bt["item_number"].astype(str)
+            # Keep most recent BT and GT per item
+            df_bt = df_bt.drop_duplicates("item_number", keep="first")
+            df = df.merge(df_bt, on="item_number", how="left")
+        except Exception:
+            df["bt_number"] = None
+            df["gt_number"] = None
 
         conn.close()
         return df, None

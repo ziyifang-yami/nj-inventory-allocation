@@ -64,7 +64,7 @@ from config import P
 st.set_page_config(
     page_title="NJ Inventory Allocation",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ── Global style ──────────────────────────────────────────────────────────────
@@ -175,8 +175,9 @@ df["fc_d2s"] = df.apply(
 # ── calc_ideal (from server v3) ───────────────────────────────────────────────
 def calc_ideal(df_in, aod_top, ol_top, ol_tail,
                top_trigger=28, top_target=28,
-               mid_routine=28, mid_emergency=14,
+               mid_routine=14, mid_emergency=3,
                mid_evict=30, mid_target=28,
+               mid_evict_buffer=3,
                min_loc_qty=5):
     """
     Vectorized ideal-state calculation — replaces the row-by-row Python loop.
@@ -247,7 +248,9 @@ def calc_ideal(df_in, aod_top, ol_top, ol_tail,
     )
 
     # ── MIDDLE FC→DC ─────────────────────────────────────────
-    keep_qty   = np.where(adl > 0, np.round(adl * mid_evict), fc)
+    # min_keep uses buffer: FC can drop to (mid_evict - mid_evict_buffer) d2s after transfer
+    # This matches actual engine: min_keep = adl × (mid_keep_d2s - mid_evict_buffer_d2s)
+    keep_qty   = np.where(adl > 0, np.round(adl * max(0, mid_evict - mid_evict_buffer)), fc)
     excess     = fc - keep_qty
     excess_vol = excess * vol
 
@@ -358,7 +361,7 @@ df["biz_type"] = df["item_number"].astype(str).str[0].map({"1": "自营", "5": "
 from cache_db import CacheDB as _CacheDB_main
 _db_main = _CacheDB_main("results/sfc_cache.db")
 if "inv_days_30" in df.columns:
-    df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+    df.loc[df["inv_days_30"].isna() | (df["inv_days_30"] < 30), "seg"] = "TBD"
 
 # ── 只保留库内有库存的 SKU（fc_qty>0 或 sfc_qty>0）────────────
 for c in ["fc_qty", "sfc_qty"]:
@@ -397,9 +400,8 @@ _inv_status = '🟢 Live' if INV_TS == 'live' else '🟡 ' + INV_TS
 
 st.markdown(
     f"<span style='color:#999;font-size:.9rem'>"
-    f"In-stock SKUs: {N:,} &nbsp;|&nbsp; "
-    f"Sales data: {DATA_TS} &nbsp;|&nbsp; "
-    f"Inventory: {_inv_status}"
+    f"In-stock SKUs: {N:,} &nbsp;{_inv_status}"
+    f" &nbsp;|&nbsp; Sales Segment: {DATA_TS}"
     f"</span>",
     unsafe_allow_html=True
 )
@@ -528,23 +530,28 @@ with tab_dash:
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_compare:
     # ── 动态计算理想状态（实时 sidebar 阈值 + Planning D2S 参数）─────────
-    # Read Planning D2S params from session_state (set by Planning tab sliders)
+    # Defaults match actual engine thresholds in config.py:
+    #   mid_routine=14 matches mid_replen_d2s (T2 trigger)
+    #   mid_evict=30   matches mid_evict_d2s
     _top_trig   = st.session_state.get("p_top_trig",   28)
     _top_target = st.session_state.get("p_top_target", 28)
-    _mid_rout   = st.session_state.get("p_mid_rout",   28)
-    _mid_evict  = st.session_state.get("p_mid_evict",  30)
-    _mid_target = st.session_state.get("p_mid_target", 28)
+    # Use engine defaults — don't let old session values override
+    _mid_rout   = P.get("mid_replen_d2s", 14)
+    _mid_evict  = P.get("mid_evict_d2s",  30)
+    _mid_target = P.get("mid_target_d2s", 28)
+    _mid_buffer = P.get("mid_evict_buffer_d2s", 3)
 
     # Cache key — only recompute when any param changes
-    _ideal_key = (aod_top, ol_top, ol_tail,
-                  _top_trig, _top_target, _mid_rout, _mid_evict, _mid_target)
+    _ideal_key = ("v2", aod_top, ol_top, ol_tail,
+                  _top_trig, _top_target, _mid_rout, _mid_evict, _mid_target, _mid_buffer)
     if (st.session_state.get("_ideal_cache_key") != _ideal_key
             or "df_ideal" not in st.session_state):
         st.session_state["df_ideal"] = calc_ideal(
             df, aod_top, ol_top, ol_tail,
             top_trigger=_top_trig,   top_target=_top_target,
-            mid_routine=_mid_rout,   mid_emergency=14,
+            mid_routine=_mid_rout,   mid_emergency=P.get("mid_emergency_d2s", 3),
             mid_evict=_mid_evict,    mid_target=_mid_target,
+            mid_evict_buffer=_mid_buffer,
         )
         st.session_state["_ideal_cache_key"] = _ideal_key
     df_ideal = st.session_state["df_ideal"]
@@ -606,11 +613,12 @@ with tab_compare:
             f"</div>"
         )
 
-    sc1, sc2, sc3 = st.columns(3)
+    sc1, sc2, sc3, sc4 = st.columns(4)
     for col, seg, color in [
         (sc1, "TOP",    COLORS["TOP"]),
         (sc2, "MIDDLE", COLORS["MIDDLE"]),
         (sc3, "TAIL",   COLORS["TAIL"]),
+        (sc4, "TBD",    "#9E9E9E"),
     ]:
         sub   = df_ideal[df_ideal["seg"] == seg]
         sub_d = sub
@@ -664,6 +672,7 @@ with tab_compare:
                   padding:4px 14px;font-size:1.05rem;font-weight:700">{seg}</span>
             <span style="color:#555;font-size:1.05rem;font-weight:600">{n:,} SKUs total</span>
           </div>
+          {"<div style='font-size:.82rem;color:#888;margin-bottom:10px;font-style:italic'>New products — no transfer, held in current location</div>" if seg == "TBD" else "<div style='font-size:.82rem;color:#888;margin-bottom:10px;font-style:italic'>" + {"TOP":"FC primary — all SFC stock moved to FC","MIDDLE":"Dual warehouse — replenish to FC d2s<14, evict FC excess d2s>30","TAIL":"SFC primary — all FC stock cleared to SFC"}.get(seg,"") + "</div>"}
           <div style="font-size:.88rem;font-weight:700;color:#555;text-transform:uppercase;
                letter-spacing:.05em;margin-bottom:8px">SKU Location (Before → After)
           </div>
@@ -1040,112 +1049,200 @@ with tab_compare:
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_fc2sfc:
     from cache_db import CacheDB as _CacheDB2
-    _db2     = _CacheDB2("results/sfc_cache.db")
-    _df_mid  = _db2.read_fc2sfc_task("MIDDLE_EVICT")
-    _df_tail = _db2.read_fc2sfc_task("TAIL_CLEAR")
+    _db2        = _CacheDB2("results/sfc_cache.db")
+    _df_loc_clr = _db2.read_fc2sfc_task("LOC_CLEAR")
+    _df_mid     = _db2.read_fc2sfc_task("MIDDLE_EVICT")
+    _df_tail    = _db2.read_fc2sfc_task("TAIL_CLEAR")
+
+    # ── Tab timestamp ──────────────────────────────────────────
+    _fc2sfc_age = _db2.age_minutes("fc2sfc_tasks")
+    _fc2sfc_ts_row = None
+    try:
+        import sqlite3 as _sq
+        _sq_c = _sq.connect("results/sfc_cache.db")
+        _fc2sfc_ts_row = _sq_c.execute("SELECT updated_at FROM meta WHERE table_name='fc2sfc_tasks'").fetchone()
+        _sq_c.close()
+    except: pass
+    if _fc2sfc_ts_row:
+        from datetime import datetime as _dt; from zoneinfo import ZoneInfo as _ZI
+        _fc2sfc_ts = _dt.fromisoformat(_fc2sfc_ts_row[0]).astimezone(_ZI("America/New_York"))
+        st.caption(f"🕐 FC transit lot data last sync: {_fc2sfc_ts.strftime('%Y-%m-%d %H:%M ET')}  ({_fc2sfc_age:.0f} min ago)")
 
     def _nskus2(tdf): return tdf["item_number"].nunique() if tdf is not None and not tdf.empty and "item_number" in tdf.columns else 0
-    _c1, _c2 = st.columns(2)
-    _c1.metric("🗑️ TAIL Clear", f"{_nskus2(_df_tail):,} SKUs")
-    _c2.metric("📤 MIDDLE Evict", f"{_nskus2(_df_mid):,} SKUs")
+    _c1, _c2, _c3 = st.columns(3)
+    _c1.metric("🏷️ LOC Clear",    f"{_nskus2(_df_loc_clr):,} SKUs · {_df_loc_clr['location_no'].nunique() if not _df_loc_clr.empty else 0:,} locs")
+    _c2.metric("🗑️ TAIL Clear",   f"{_nskus2(_df_tail):,} SKUs")
+    _c3.metric("📤 MIDDLE Evict", f"{_nskus2(_df_mid):,} SKUs")
 
-    _fc2sfc_tail_tab, _fc2sfc_mid_tab = st.tabs([
+    _fc2sfc_loc_tab, _fc2sfc_tail_tab, _fc2sfc_mid_tab = st.tabs([
+        f"🏷️ LOC Clear — Vacate Location  ({len(_df_loc_clr):,} rows)",
         f"🗑️ TAIL Clear — FC→SFC  ({len(_df_tail):,} rows)",
         f"📤 MIDDLE Evict — FC→SFC  ({len(_df_mid):,} rows)",
     ])
 
-    _FC_COLS = ["item_number","location_no","loc_type","qty_to_transfer","qty",
-                "exp_date","fc_d2s","avg_daily_orders","excess_qty","rule"]
+    _FC2SFC_DISPLAY_COLS = [
+        "segment","item_number","loc_type","location_no","qty_to_transfer","exp_date",
+        "size_id","loc_size","fc_d2s","avg_daily_orders","rule",
+    ]
 
-    def _render_fc2sfc(tab, tdf, key, caption_txt):
-        with tab:
-            if tdf is None or tdf.empty:
-                st.info("No tasks. Run the refresh script or click Refresh All in the sidebar.")
-                return
-            cols = [c for c in _FC_COLS if c in tdf.columns]
-            tdf = tdf[cols].copy()
-            for c in ["qty_to_transfer","qty","fc_d2s","avg_daily_orders","excess_qty"]:
-                if c in tdf.columns:
-                    tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
+    def _render_fc2sfc(tdf, key, label):
+        if tdf is None or tdf.empty:
+            st.info(f"No {label} tasks. Data refreshes every 30 min.")
+            return
 
-            # ── Filters + Rows/Page — single row ─────────────
-            _fc1, _fc2, _fc3 = st.columns([1.5, 1, 0.7])
-            with _fc1:
-                _s = st.text_input("🔍 SKU", key=f"fc2_s_{key}", placeholder="Item number")
-            with _fc2:
-                _loctypes = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
-                _lf = st.selectbox("Loc Type", _loctypes, key=f"fc2_lf_{key}")
-            with _fc3:
-                st.selectbox("Rows/Page", options=[50, 100, 200, 500, "All"],
-                             index=1, key=f"rowlimit_fc2_{key}", label_visibility="visible")
+        # Derive segment from trigger_type if not stored
+        if "segment" not in tdf.columns or (tdf["segment"].fillna("") == "").all():
+            if "trigger_type" in tdf.columns:
+                def _infer_seg(tt):
+                    tt = str(tt).upper()
+                    if "MIDDLE" in tt: return "MIDDLE"
+                    if "TAIL"   in tt: return "TAIL"
+                    return ""
+                tdf["segment"] = tdf["trigger_type"].apply(_infer_seg)
+            if key == "fc2_middle_evict" and (tdf.get("segment", pd.Series(dtype=str)).fillna("") == "").all():
+                tdf["segment"] = "MIDDLE"
+            elif key == "fc2_tail_clear" and (tdf.get("segment", pd.Series(dtype=str)).fillna("") == "").all():
+                tdf["segment"] = "TAIL"
 
-            if _s:
-                tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
-            if _lf != "All" and "loc_type" in tdf.columns:
-                tdf = tdf[tdf["loc_type"] == _lf]
+        # Backfill fc_d2s + avg_daily_orders if missing
+        _missing_d2s = tdf["fc_d2s"].isna().all() if "fc_d2s" in tdf.columns else True
+        if _missing_d2s and "df" in dir():
+            _meta = df[["item_number","fc_d2s","avg_daily_orders"]].drop_duplicates("item_number")
+            tdf = tdf.drop(columns=["fc_d2s","avg_daily_orders"], errors="ignore")
+            tdf = tdf.merge(_meta, on="item_number", how="left")
 
-            # Sort: location_no ASC
-            if "location_no" in tdf.columns:
-                tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
-            tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
+        for c in ["qty_to_transfer","fc_d2s","avg_daily_orders","excess_qty","keep_qty"]:
+            if c in tdf.columns:
+                tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
-            # ── Pagination state ──────────────────────────────
-            total_rows = len(tdf)
-            n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-            caption = f"Total {total_rows:,} rows · {n_skus} SKUs · {caption_txt}"
-            _preset = st.session_state.get(f"rowlimit_fc2_{key}", 100)
-            _page   = st.session_state.get(f"fc2_page_{key}", 1)
-            _per_page = total_rows if _preset == "All" else int(_preset)
-            _total_pages = max(1, -(-total_rows // _per_page))
-            _page = max(1, min(_page, _total_pages))
-            st.session_state[f"fc2_page_{key}"] = _page
-            tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+        cols = [c for c in _FC2SFC_DISPLAY_COLS if c in tdf.columns]
+        tdf  = tdf[cols].copy()
 
-            # ── Caption + Download ────────────────────────────
-            _cap_col, _dl_col = st.columns([4, 1])
-            with _cap_col:
-                st.caption(caption)
-            with _dl_col:
-                st.download_button(
-                    "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
-                    file_name=f"fc_to_sfc_{key.lower()}.csv", mime="text/csv",
-                    key=f"dl_fc2_{key}", use_container_width=True,
-                )
+        # ── Filters + Rows/Page — single row ─────────────────────
+        _fc0, _fc1, _fc2, _fc3, _fc4 = st.columns([1.5, 0.9, 0.9, 1.2, 0.7])
+        with _fc0:
+            _s = st.text_input("🔍 SKU", key=f"{key}_s", placeholder="Item number")
+        with _fc1:
+            _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
+            _sf = st.selectbox("Segment", _segs, key=f"{key}_sf")
+        with _fc2:
+            _locs = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
+            _lf = st.selectbox("Loc Type", _locs, key=f"{key}_lf")
+        with _fc3:
+            _seg_cur = st.session_state.get(f"{key}_sf", "All")
+            _lf_cur  = st.session_state.get(f"{key}_lf", "All")
+            _preview = tdf.copy()
+            if _seg_cur != "All" and "segment" in _preview.columns:
+                _preview = _preview[_preview["segment"] == _seg_cur]
+            if _lf_cur != "All" and "loc_type" in _preview.columns:
+                _preview = _preview[_preview["loc_type"] == _lf_cur]
+            _ls_opts = ["All"] + sorted(_preview["loc_size"].dropna().unique().tolist()) if "loc_size" in _preview.columns else ["All"]
+            _lsf = st.selectbox("Loc Size", _ls_opts, key=f"{key}_lsf")
+        with _fc4:
+            st.selectbox("Rows/Page", options=[50, 100, 200, 500, "All"],
+                         index=1, key=f"{key}_rpp", label_visibility="visible")
 
-            st.dataframe(tdf_show, use_container_width=True)
+        if _s:
+            tdf = tdf[tdf["item_number"].astype(str).str.contains(_s.strip(), case=False, na=False)]
+        if _sf != "All" and "segment" in tdf.columns:
+            tdf = tdf[tdf["segment"] == _sf]
+        if _lf != "All" and "loc_type" in tdf.columns:
+            tdf = tdf[tdf["loc_type"] == _lf]
+        if _lsf != "All" and "loc_size" in tdf.columns:
+            tdf = tdf[tdf["loc_size"] == _lsf]
 
-            # ── CSS + page nav ────────────────────────────────
-            st.markdown("""<style>
-            div[data-testid="stTextInput"] > div > div > input { max-width: 32px !important; }
-            </style>""", unsafe_allow_html=True)
+        # Sort: avg_daily_orders ASC → location_no ASC
+        sort_cols = []
+        if "avg_daily_orders" in tdf.columns:
+            tdf["avg_daily_orders"] = pd.to_numeric(tdf["avg_daily_orders"], errors="coerce")
+            sort_cols.append("avg_daily_orders")
+        if "location_no" in tdf.columns:
+            sort_cols.append("location_no")
+        if sort_cols:
+            tdf = tdf.sort_values(sort_cols, ascending=True, na_position="last")
+        tdf = tdf.reset_index(drop=True); tdf.index = tdf.index + 1
 
-            if _total_pages > 1:
-                _nav_left, _nav_right = st.columns([5.0, 0.8])
-                with _nav_right:
-                    _n1, _n2, _n3, _n4, _n5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
-                    with _n1:
-                        if st.button("‹", key=f"fc2_prev_{key}", disabled=_page == 1):
-                            st.session_state[f"fc2_page_{key}"] = _page - 1; st.rerun()
-                    with _n2:
-                        st.markdown('<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
-                    with _n3:
-                        _go = st.text_input("pg", value=str(_page), key=f"fc2_page_input_{key}", label_visibility="collapsed")
-                        try:
-                            _go_int = int(_go)
-                            if 1 <= _go_int <= _total_pages and _go_int != _page:
-                                st.session_state[f"fc2_page_{key}"] = _go_int; st.rerun()
-                        except ValueError:
-                            pass
-                    with _n4:
-                        st.markdown(f'<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
-                    with _n5:
-                        if st.button("›", key=f"fc2_next_{key}", disabled=_page == _total_pages):
-                            st.session_state[f"fc2_page_{key}"] = _page + 1; st.rerun()
+        # ── Pagination ────────────────────────────────────────────
+        # Reset to page 1 if any filter changed
+        _filter_state = (_s, _sf, _lf, _lsf)
+        if st.session_state.get(f"{key}_last_filter") != _filter_state:
+            st.session_state[f"{key}_pg"] = 1
+            st.session_state[f"{key}_last_filter"] = _filter_state
+        total_rows = len(tdf)
+        n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
+        _preset = st.session_state.get(f"{key}_rpp", 100)
+        _page   = st.session_state.get(f"{key}_pg", 1)
+        _per_page = total_rows if _preset == "All" else int(_preset)
+        _total_pages = max(1, -(-total_rows // _per_page))
+        _page = max(1, min(_page, _total_pages))
+        st.session_state[f"{key}_pg"] = _page
+        tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page].copy()
+        # Within-page location sort (only when paginated, not All)
+        if _preset != "All" and "location_no" in tdf_show.columns:
+            tdf_show = tdf_show.sort_values("location_no", ascending=True, na_position="last")
 
-    _render_fc2sfc(_fc2sfc_tail_tab, _df_tail, "tail_clear",
-                   "TAIL SKUs with FC stock. Full clear — move everything from FC to SFC.")
-    _render_fc2sfc(_fc2sfc_mid_tab,  _df_mid,  "middle_evict",
-                   "SKUs where FC has too much stock (D2S > 30). Transfer excess back to SFC, keep 30-day supply in FC.")
+        _cap_col, _dl_col = st.columns([4, 1])
+        with _cap_col:
+            n_locs = tdf["location_no"].nunique() if "location_no" in tdf.columns else "?"
+            st.caption(f"Total {total_rows:,} rows · {n_skus} SKUs · {n_locs} Locations")
+        with _dl_col:
+            st.download_button(
+                "⬇️ Download CSV", tdf_show.to_csv(index=False).encode(),
+                file_name=f"fc_to_sfc_{key}.csv", mime="text/csv",
+                key=f"{key}_dl", use_container_width=True,
+            )
+
+        st.dataframe(tdf_show, use_container_width=True)
+
+        # ── Page nav ──────────────────────────────────────────────
+        st.markdown(f"""<style>
+        div[data-testid="stTextInput"][data-key="page_input_{key}"] {{
+            max-width: 70px !important;
+        }}
+        div[data-testid="stTextInput"][data-key="page_input_{key}"] input {{
+            text-align: center; font-size: 1.2rem !important;
+        }}
+        </style>""", unsafe_allow_html=True)
+
+        if _total_pages > 1:
+            _nav_l, _nav_r = st.columns([6, 1.5])
+            with _nav_r:
+                _n1, _n2, _n3, _n4, _n5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.4])
+                with _n1:
+                    if st.button("‹", key=f"{key}_prev", disabled=_page == 1):
+                        st.session_state[f"{key}_pg"] = _page - 1; st.rerun()
+                with _n2:
+                    st.markdown('<p style="font-size:1.2rem;color:#555;margin:0;padding-top:3px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
+                with _n3:
+                    _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
+                    try:
+                        _go_int = int(_go)
+                        if 1 <= _go_int <= _total_pages and _go_int != _page:
+                            st.session_state[f"{key}_pg"] = _go_int; st.rerun()
+                    except ValueError:
+                        pass
+                with _n4:
+                    st.markdown(f'<p style="font-size:1.2rem;color:#555;margin:0;padding-top:3px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
+                with _n5:
+                    if st.button("›", key=f"{key}_next", disabled=_page == _total_pages):
+                        st.session_state[f"{key}_pg"] = _page + 1; st.rerun()
+
+    with _fc2sfc_loc_tab:
+        _n_lc_locs = _df_loc_clr["location_no"].nunique() if not _df_loc_clr.empty else 0
+        st.caption(
+            f"**Highest priority.** Locations where ALL SKUs are being transferred out — "
+            f"clearing these frees up entire locations.  "
+            f"**{_n_lc_locs:,} locations · {_nskus2(_df_loc_clr):,} SKUs** (MIDDLE + TAIL combined)"
+        )
+        _render_fc2sfc(_df_loc_clr, "fc2_loc_clear", "LOC Clear")
+
+    with _fc2sfc_tail_tab:
+        st.caption("TAIL SKUs with FC stock. Full clear — move all FC lots to SFC. LOC_CLEAR SKUs excluded.")
+        _render_fc2sfc(_df_tail, "fc2_tail_clear", "TAIL Clear")
+
+    with _fc2sfc_mid_tab:
+        st.caption("SKUs where FC D2S > 30. Transfer excess to SFC, keep 30 D2S in FC. LOC_CLEAR SKUs excluded.")
+        _render_fc2sfc(_df_mid, "fc2_middle_evict", "MIDDLE Evict")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1159,6 +1256,18 @@ with tab_sfc2fc:
 
     _DB_PATH  = "results/sfc_cache.db"
     _db       = _CacheDB(_DB_PATH)
+
+    # ── Tab timestamp ──────────────────────────────────────────
+    _sfc2fc_age = _db.age_minutes("task_list")
+    try:
+        import sqlite3 as _sq2; _sq2_c = _sq2.connect(_DB_PATH)
+        _sfc2fc_ts_row = _sq2_c.execute("SELECT updated_at FROM meta WHERE table_name='task_list'").fetchone()
+        _sq2_c.close()
+        if _sfc2fc_ts_row:
+            from datetime import datetime as _dt2; from zoneinfo import ZoneInfo as _ZI2
+            _sfc2fc_ts = _dt2.fromisoformat(_sfc2fc_ts_row[0]).astimezone(_ZI2("America/New_York"))
+            st.caption(f"🕐 SFC inventory lot data last sync: {_sfc2fc_ts.strftime('%Y-%m-%d %H:%M ET')}  ({_sfc2fc_age:.0f} min ago)")
+    except: pass
 
     # ── Sub-tabs ──────────────────────────────────────────────────────────────
     _t2 = _db.read_task_list("T2")
@@ -1203,7 +1312,7 @@ with tab_sfc2fc:
                     tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
             # ── Filters + Rows/Page — single row ─────────────
-            _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 1, 1, 0.7])
+            _fc1, _fc2, _fc3, _fc4 = st.columns([1.5, 1, 1, 0.7])
             with _fc1:
                 _s = st.text_input("🔍 SKU", key=f"s_{key}", placeholder="Item number")
             with _fc2:
@@ -1226,7 +1335,20 @@ with tab_sfc2fc:
             # ── Sort ──────────────────────────────────────────
             if "segment" in tdf.columns and "location_no" in tdf.columns:
                 tdf["_seg_order"] = tdf["segment"].map({"TOP": 0, "MIDDLE": 1}).fillna(2)
-                tdf = tdf.sort_values(["_seg_order", "location_no"], ascending=[True, True], na_position="last")
+                if key in ("T1", "T2") and "fc_d2s" in tdf.columns:
+                    # T1/T2 global sort: segment → fc_d2s ASC → OL DESC → ADL DESC
+                    # (location_no sort applied within each page, not globally)
+                    sort_cols = ["_seg_order", "fc_d2s"]
+                    sort_asc  = [True, True]
+                    if "order_lines_30d" in tdf.columns:
+                        sort_cols.append("order_lines_30d"); sort_asc.append(False)
+                    if "avg_daily_orders" in tdf.columns:
+                        sort_cols.append("avg_daily_orders"); sort_asc.append(False)
+                    tdf = tdf.sort_values(sort_cols, ascending=sort_asc, na_position="last")
+                else:
+                    tdf = tdf.sort_values(
+                        ["_seg_order", "location_no"], ascending=[True, True], na_position="last"
+                    )
                 tdf = tdf.drop(columns=["_seg_order"])
             elif "location_no" in tdf.columns:
                 tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
@@ -1237,7 +1359,8 @@ with tab_sfc2fc:
             # ── Pagination state ──────────────────────────────
             total_rows = len(tdf)
             n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-            caption = f"Total {total_rows:,} rows · {n_skus} SKUs"
+            n_locs = tdf["location_no"].nunique() if "location_no" in tdf.columns else "?"
+            caption = f"Total {total_rows:,} rows · {n_skus} SKUs · {n_locs} Locations"
             if extra:
                 caption += f" · {extra}"
             _preset = st.session_state.get(f"rowlimit_{key}", 100)
@@ -1246,7 +1369,10 @@ with tab_sfc2fc:
             _total_pages = max(1, -(-total_rows // _per_page))
             _page = max(1, min(_page, _total_pages))
             st.session_state[f"page_{key}"] = _page
-            tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+            tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page].copy()
+            # Within-page location sort (only when paginated, not All)
+            if _preset != "All" and "location_no" in tdf_show.columns:
+                tdf_show = tdf_show.sort_values("location_no", ascending=True, na_position="last")
 
             # ── Caption + Download ────────────────────────────
             _cap_col, _dl_col = st.columns([4, 1])
@@ -1262,8 +1388,13 @@ with tab_sfc2fc:
             st.dataframe(tdf_show, use_container_width=True)
 
             # ── CSS + page nav ────────────────────────────────
-            st.markdown("""<style>
-            div[data-testid="stTextInput"] > div > div > input { max-width: 32px !important; }
+            st.markdown(f"""<style>
+            div[data-testid="stTextInput"][data-key="page_input_{key}"] {{
+                max-width: 70px !important;
+            }}
+            div[data-testid="stTextInput"][data-key="page_input_{key}"] input {{
+                text-align: center; font-size: 0.85rem !important;
+            }}
             </style>""", unsafe_allow_html=True)
 
             if _total_pages > 1:
@@ -1315,7 +1446,7 @@ with tab_sfc2fc:
                     _df_r = _df_r.merge(_df_fc_exp[["item_number","fc_min_exp_date","fc_max_exp_date"]], on="item_number", how="left")
                 _df_lots = _db.read_sfc_lots()
                 _tdf_t1 = _build_sfc2fc(_df_lots, _df_r, _cfg1, target_lists=["T1"]).get("T1", pd.DataFrame())
-            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1", extra="TOP=7d · MID=7d (cached)")
+            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1")
         else:
             _cfg1 = dict(P); _cfg1["t1_top_target_d2s"]=_t1_top; _cfg1["t1_mid_target_d2s"]=_t1_mid
             _df_r = df[df["item_number"].isin(df[df["sfc_qty"]>0]["item_number"])].copy()
@@ -1324,7 +1455,7 @@ with tab_sfc2fc:
                 _df_r = _df_r.merge(_df_fc_exp[["item_number","fc_min_exp_date","fc_max_exp_date"]], on="item_number", how="left")
             _df_lots = _db.read_sfc_lots()
             _tdf_t1 = _build_sfc2fc(_df_lots, _df_r, _cfg1, target_lists=["T1"]).get("T1", pd.DataFrame())
-            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1", extra=f"TOP={_t1_top}d · MID={_t1_mid}d (live)")
+            _render_sfc(_sfc_t1, _tdf_t1, "T1", "T1")
 
     _render_sfc(_sfc_t2, _t2, "T2", "T2")
     _render_sfc(_sfc_t3, _t3, "T3", "T3")
@@ -1339,8 +1470,24 @@ with tab_putaway:
     from cache_db import CacheDB as _CacheDB_pa
     _db_pa = _CacheDB_pa("results/sfc_cache.db")
 
-    st.markdown("### Putaway Decision Table")
-    st.caption("Items currently in RECG receiving staging (location_type=1) — received but not yet put away.")
+    _pa_hdr_l, _pa_hdr_r = st.columns([6, 1])
+    with _pa_hdr_l:
+        st.markdown("### Putaway Decision Table")
+        st.caption("Items currently in RECG receiving staging (location_type=1) — received but not yet put away.")
+    with _pa_hdr_r:
+        if st.button("🔄 Refresh", key="pa_refresh_btn", help="Re-query live WH data and update cache"):
+            with st.spinner("Refreshing pending putaway…"):
+                try:
+                    _df_pa_fresh, _pa_fresh_err = load_pending_putaway()
+                    if _pa_fresh_err:
+                        st.error(f"Refresh failed: {_pa_fresh_err}")
+                    else:
+                        _db_pa.write_pending_putaway(_df_pa_fresh)
+                        st.success(f"✅ Updated — {len(_df_pa_fresh):,} items")
+                        st.cache_data.clear()
+                        st.rerun()
+                except Exception as _pa_ex:
+                    st.error(f"Error: {_pa_ex}")
 
     # ── Load pending putaway from SQLite cache (refreshed every 5 min by cron) ─
     df_pending = _db_pa.read_pending_putaway()
@@ -1369,6 +1516,19 @@ with tab_putaway:
             df_inv_ref_pa["fc_min_exp_date"] = None
             df_inv_ref_pa["fc_max_exp_date"] = None
 
+        # Compute sfc_min_exp_date from sfc_lots cache
+        _sfc_lots_pa = _db_pa.read_sfc_lots()
+        if not _sfc_lots_pa.empty and "exp_date" in _sfc_lots_pa.columns:
+            _sfc_min_exp = (
+                _sfc_lots_pa[_sfc_lots_pa["exp_date"].notna()]
+                .groupby("item_number")["exp_date"].min()
+                .reset_index()
+                .rename(columns={"exp_date": "sfc_min_exp_date"})
+            )
+            df_inv_ref_pa = df_inv_ref_pa.merge(_sfc_min_exp, on="item_number", how="left")
+        else:
+            df_inv_ref_pa["sfc_min_exp_date"] = None
+
         # ── Merge classification + inventory into pending ─────────────────────
         df_pa = df_pending.copy()
         df_pa["item_number"] = df_pa["item_number"].astype(str)
@@ -1381,7 +1541,7 @@ with tab_putaway:
         _exp_flags_pa = _db_pa.read_exp_flags()  # returns set of item_numbers
         df_pa["need_minimal_exp"] = df_pa["item_number"].isin(_exp_flags_pa).astype(int)
         df_pa = df_pa.merge(
-            df_inv_ref_pa[["item_number","sfc_qty","fc_d2s","fc_min_exp_date"]],
+            df_inv_ref_pa[["item_number","sfc_qty","fc_d2s","fc_min_exp_date","sfc_min_exp_date"]],
             on="item_number", how="left"
         )
 
@@ -1391,7 +1551,7 @@ with tab_putaway:
         df_pa["sfc_qty"] = df_pa["sfc_qty"].fillna(0)
         df_pa["fc_d2s"]  = df_pa["fc_d2s"].fillna(0)
         df_pa["need_minimal_exp"] = df_pa["need_minimal_exp"].fillna(0).astype(int)
-        df_pa["seg"] = df_pa["seg"].fillna("MIDDLE")  # default MIDDLE if unknown
+        df_pa["seg"] = df_pa["seg"].fillna("MIDDLE")  # default MIDDLE if seg unknown (not TBD)
 
         # ── Apply putaway decision ─────────────────────────────────────────────
         _decisions = df_pa.apply(lambda r: decide_putaway(r, dict(P)), axis=1, result_type="expand")
@@ -1407,7 +1567,7 @@ with tab_putaway:
 
         # ── Display ───────────────────────────────────────────────────────────
         _show = [c for c in [
-            "item_number","po_reference","location_no","waiting_putaway_qty","seg",
+            "item_number","bt_number","gt_number","po_reference","location_no","waiting_putaway_qty","seg",
             "fc_d2s","sfc_qty","putaway_zone","putaway_rule","putaway_reason"
         ] if c in df_pa.columns]
 
@@ -1415,9 +1575,11 @@ with tab_putaway:
         with _fc1:
             _pa_search = st.text_input("🔍 Item Number", key="pa_search", placeholder="e.g. 100123")
         with _fc2:
-            _pa_zone = st.selectbox("Zone", ["All", "FC", "SFC"], key="pa_zone")
+            _pa_zone = st.selectbox("Zone", ["All", "FC", "SFC", "No Need To Change Zone"], key="pa_zone")
         with _fc3:
-            _pa_seg = st.selectbox("Segment", ["All"] + sorted(df_pa["seg"].dropna().unique().tolist()), key="pa_seg")
+            _seg_order = ["TOP", "MIDDLE", "TAIL", "TBD"]
+            _seg_available = [s for s in _seg_order if s in df_pa["seg"].dropna().unique()]
+            _pa_seg = st.selectbox("Segment", ["All"] + _seg_available, key="pa_seg")
 
         df_pa_show = df_pa[_show].copy()
         if _pa_search:
@@ -1438,8 +1600,10 @@ with tab_putaway:
             df_pa_show,
             use_container_width=True,
             column_config={
-                "po_reference":        st.column_config.TextColumn("PO Ref",       width=120),
                 "item_number":         st.column_config.TextColumn("Item",         width=110),
+                "bt_number":           st.column_config.TextColumn("BT",           width=100),
+                "gt_number":           st.column_config.TextColumn("GT",           width=130),
+                "po_reference":        st.column_config.TextColumn("PO Ref",       width=120),
                 "location_no":         st.column_config.TextColumn("Location",     width=90),
                 "waiting_putaway_qty": st.column_config.NumberColumn("Qty",        width=60),
                 "seg":                 st.column_config.TextColumn("Seg",          width=70),

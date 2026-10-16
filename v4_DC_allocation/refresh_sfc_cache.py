@@ -194,11 +194,12 @@ df["seg"] = np.where((_aod >= AOD_TOP) & (_ol >= OL_TOP), "TOP",
                      np.where(_ol < OL_TAIL, "TAIL", "MIDDLE"))
 df["need_minimal_exp"] = df["item_number"].isin(exp_items).astype(int)
 
-# ── Step 4b: TBD segment — in-stock days < 30 (insufficient sales history) ────
+# ── Step 4b: TBD segment — in-stock days < 30 OR no sales data at all ────────
 # If a SKU has been in stock fewer than 30 days total (inv_days_30 < 30),
+# OR has no Athena record at all (inv_days_30 is NaN — new product never sold),
 # we don't have enough data to classify it reliably → mark as TBD.
 # inv_days_30 is already in df from the Athena sales merge.
-_tbd_mask = df["inv_days_30"] < 30
+_tbd_mask = df["inv_days_30"].isna() | (df["inv_days_30"] < 30)
 df.loc[_tbd_mask, "seg"] = "TBD"
 _n_tbd = _tbd_mask.sum()
 # Save to SQLite so apps can read it
@@ -440,34 +441,55 @@ else:
                 _df_fc_lots = pd.DataFrame()
             else:
                 print(f"      FC lots: {len(_df_fc_lots):,} rows")
+                # Exclude V-prefix locations (virtual/staging — not transferable)
+                if not _df_fc_lots.empty and "location_no" in _df_fc_lots.columns:
+                    _before = len(_df_fc_lots)
+                    _df_fc_lots = _df_fc_lots[~_df_fc_lots["location_no"].astype(str).str.startswith("V")].copy()
+                    _n_removed = _before - len(_df_fc_lots)
+                    if _n_removed:
+                        print(f"      Excluded {_n_removed:,} rows in V-prefix locations")
 
-            # ── LOC_CLEAR pre-computation: query total SKU count per location ──
-            # We need to know how many SKUs are in EACH location (including
-            # SKUs NOT in the transfer list) to determine if a location can
-            # be fully vacated.
-            # This is a lightweight aggregation query — no lot detail needed.
-            _loc_total_skus: dict = {}  # location_no → total distinct SKUs
-            try:
-                _conn_lc = _connect()
-                with _conn_lc.cursor() as _cur_lc:
-                    _cur_lc.execute("""
-                        SELECT li.location_no,
-                               COUNT(DISTINCT li.item_number) AS total_skus
-                        FROM yamibuy_wh.wh_lot_inventory li
-                        JOIN yamibuy_wh.wh_storage_location wsl
-                            ON wsl.location_no = li.location_no
-                            AND wsl.warehouse_number = li.warehouse_number
-                        WHERE li.warehouse_number = '002'
-                          AND li.quantity > 0
-                          AND wsl.location_type IN (3, 4)
-                          AND wsl.zone_id != 2
-                        GROUP BY li.location_no
-                    """)
-                    _loc_total_skus = {r[0]: r[1] for r in _cur_lc.fetchall()}
-                _conn_lc.close()
-                print(f"      Location SKU counts: {len(_loc_total_skus):,} locations")
-            except Exception as _elc:
-                print(f"      Location SKU count query failed: {_elc} — LOC_CLEAR disabled")
+            # ── LOC_CLEAR pre-computation: live SKU count for candidate locations ──
+            # Query ONLY the locations that appear in our transfer rows.
+            # Rule: a location is clearable if every SKU with qty > 0 in that
+            # location is also in our transfer list. SKUs with qty = 0 are
+            # already empty and don't block clearing.
+            # We do NOT query all ~20K warehouse locations — only the candidate set.
+            _loc_live_skus: dict = {}   # location_no → set of item_numbers with qty>0
+            _candidate_locs: list = []
+            if not _df_fc_lots.empty and "location_no" in _df_fc_lots.columns:
+                _candidate_locs = _df_fc_lots["location_no"].dropna().unique().tolist()
+
+            if _candidate_locs:
+                try:
+                    _conn_lc = _connect()
+                    # Query in chunks to avoid huge IN clauses
+                    _loc_chunks = [_candidate_locs[i:i+500]
+                                   for i in range(0, len(_candidate_locs), 500)]
+                    with _conn_lc.cursor() as _cur_lc:
+                        for _lchunk in _loc_chunks:
+                            _ph = ",".join(["%s"] * len(_lchunk))
+                            _cur_lc.execute(f"""
+                                SELECT li.location_no, li.item_number
+                                FROM yamibuy_wh.wh_lot_inventory li
+                                JOIN yamibuy_wh.wh_storage_location wsl
+                                    ON wsl.location_no = li.location_no
+                                    AND wsl.warehouse_number = li.warehouse_number
+                                WHERE li.warehouse_number = '002'
+                                  AND li.quantity > 0
+                                  AND wsl.location_type IN (3, 4)
+                                  AND wsl.zone_id != 2
+                                  AND li.location_no IN ({_ph})
+                            """, _lchunk)
+                            for _row in _cur_lc.fetchall():
+                                _loc, _sku = _row[0], str(_row[1])
+                                if _loc not in _loc_live_skus:
+                                    _loc_live_skus[_loc] = set()
+                                _loc_live_skus[_loc].add(_sku)
+                    _conn_lc.close()
+                    print(f"      Live SKU counts fetched for {len(_loc_live_skus):,} candidate locations")
+                except Exception as _elc:
+                    print(f"      Location live-SKU query failed: {_elc} — LOC_CLEAR disabled")
 
             # Build location-level rows for MIDDLE EVICT
             _mid_rows = []
@@ -476,7 +498,7 @@ else:
                 for _, _sku_row in _mid.iterrows():
                     if str(_sku_row["item_number"]) not in _mid_set:
                         continue
-                    _locs = _sel_mid(_df_fc_lots, _sku_row)
+                    _locs = _sel_mid(_df_fc_lots, _sku_row, cfg=dict(_P2))
                     if not _locs.empty:
                         _locs["segment"]          = "MIDDLE"
                         _locs["trigger_type"]     = "MIDDLE_EVICT"
@@ -515,26 +537,46 @@ else:
             if not _df_tail_locs.empty and "location_no" in _df_tail_locs.columns:
                 _df_tail_locs = _df_tail_locs.sort_values("location_no", ascending=True).reset_index(drop=True)
 
-            # ── LOC_CLEAR: locations where ALL SKUs are in the transfer set ────
-            # A location can be fully vacated when every SKU stored there is
-            # also being transferred out. These get highest priority.
+            # ── LOC_CLEAR: locations where ALL live SKUs are in the transfer set ──
+            # A location is clearable when every SKU with qty > 0 (live inventory)
+            # is also in our transfer list. SKUs with qty = 0 are already empty
+            # and don't block clearing. This is evaluated per-location using the
+            # live snapshot fetched above — not a global count from all locations.
             _df_loc_clear = pd.DataFrame()
-            if not _df_fc_lots.empty and _loc_total_skus:
-                # For each location in the transfer rows, count how many
-                # distinct transfer SKUs are there vs total SKUs in that location
+            if not _df_fc_lots.empty and _loc_live_skus:
                 _transfer_set = set(str(s) for s in _fc_skus)
 
-                # Count transfer SKUs per location (from df_fc_lots — transfer SKUs only)
-                _loc_transfer_skus = (
-                    _df_fc_lots.groupby("location_no")["item_number"]
-                    .apply(lambda x: len(set(x.astype(str))))
-                )
+                # Build: location → set of SKUs that have an actual SELECTED task row
+                # at that location in _df_mid_locs or _df_tail_locs.
+                # Critical: use the task rows (post-selection), NOT _df_fc_lots (raw lots).
+                # select_*_fc_locations may skip a location for a SKU (e.g. single-lot
+                # rule, or it picked a different location for that SKU). Only locations
+                # where every live SKU has an actual task row there qualify as LOC_CLEAR.
+                _loc_tasked_skus: dict = {}  # location_no → set of SKUs with task rows there
+                for _task_df in [_df_mid_locs, _df_tail_locs]:
+                    if not _task_df.empty and "location_no" in _task_df.columns and "item_number" in _task_df.columns:
+                        for _tloc, _tgrp in _task_df.groupby("location_no"):
+                            if _tloc not in _loc_tasked_skus:
+                                _loc_tasked_skus[_tloc] = set()
+                            _loc_tasked_skus[_tloc].update(_tgrp["item_number"].astype(str).unique())
 
-                # A location is clearable if its transfer SKU count == total SKU count
+                # A location is clearable when:
+                #   1. Every live SKU (qty>0) at that location is covered by a
+                #      task row IN THAT SAME LOCATION (not just globally triggered)
+                #   2. It has actual task rows in mid/tail lists
+                _locs_with_tasks = set()
+                if not _df_mid_locs.empty and "location_no" in _df_mid_locs.columns:
+                    _locs_with_tasks.update(_df_mid_locs["location_no"].dropna().unique())
+                if not _df_tail_locs.empty and "location_no" in _df_tail_locs.columns:
+                    _locs_with_tasks.update(_df_tail_locs["location_no"].dropna().unique())
+
                 _clearable_locs = set(
-                    loc for loc, transfer_cnt in _loc_transfer_skus.items()
-                    if _loc_total_skus.get(loc, 0) == transfer_cnt
-                    and transfer_cnt > 0
+                    loc for loc, live_set in _loc_live_skus.items()
+                    if len(live_set) > 0
+                    and loc in _locs_with_tasks                   # has actual task rows
+                    and live_set.issubset(                        # every live SKU has a task HERE
+                        _loc_tasked_skus.get(loc, set())
+                    )
                 )
 
                 if _clearable_locs:

@@ -277,9 +277,9 @@ with _timed("EXP Flags"):
     df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                             df["fc_qty"] / df["avg_daily_orders"], np.nan)
 
-    # TBD: in-stock days < 30 → not enough sales history, exclude from transfer decisions
+    # TBD: in-stock days < 30 OR no sales data (NaN) → not enough history, exclude from transfer decisions
     if "inv_days_30" in df.columns:
-        df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+        df.loc[df["inv_days_30"].isna() | (df["inv_days_30"] < 30), "seg"] = "TBD"
 
     # need_minimal_exp from SQLite (fast after first run)
     exp_items = _get_exp_flags()
@@ -414,7 +414,7 @@ def _render_table(tdf, key, label, extra_caption=""):
             tdf[c] = pd.to_numeric(tdf[c], errors="coerce")
 
     # ── Filters + Rows/Page — single row ─────────────────────
-    _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 1, 1, 0.7])
+    _fc1, _fc2, _fc3, _fc4 = st.columns([1.5, 1, 1, 0.7])
     with _fc1:
         _search = st.text_input("🔍 SKU", key=f"search_{key}", placeholder="Item number")
     with _fc2:
@@ -437,9 +437,22 @@ def _render_table(tdf, key, label, extra_caption=""):
         tdf = tdf[tdf["loc_type"] == _loc_filter]
 
     # ── Sort: TOP first then MIDDLE, within each segment by location_no ASC ──
+    # T1/T2 global sort: segment → fc_d2s ASC → OL DESC → ADL DESC
+    # (location_no applied within each page only, not globally)
     if "segment" in tdf.columns and "location_no" in tdf.columns:
         tdf["_seg_order"] = tdf["segment"].map({"TOP": 0, "MIDDLE": 1}).fillna(2)
-        tdf = tdf.sort_values(["_seg_order", "location_no"], ascending=[True, True], na_position="last")
+        if key in ("T1", "T2") and "fc_d2s" in tdf.columns:
+            sort_cols = ["_seg_order", "fc_d2s"]
+            sort_asc  = [True, True]
+            if "order_lines_30d" in tdf.columns:
+                sort_cols.append("order_lines_30d"); sort_asc.append(False)
+            if "avg_daily_orders" in tdf.columns:
+                sort_cols.append("avg_daily_orders"); sort_asc.append(False)
+            tdf = tdf.sort_values(sort_cols, ascending=sort_asc, na_position="last")
+        else:
+            tdf = tdf.sort_values(
+                ["_seg_order", "location_no"], ascending=[True, True], na_position="last"
+            )
         tdf = tdf.drop(columns=["_seg_order"])
     elif "location_no" in tdf.columns:
         tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
@@ -449,8 +462,9 @@ def _render_table(tdf, key, label, extra_caption=""):
     tdf = tdf.rename(columns=_COL_RENAME)
 
     n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
+    n_locs = tdf["location_no"].nunique() if "location_no" in tdf.columns else "?"
     total_rows = len(tdf)
-    caption = f"Total {total_rows:,} rows · {n_skus} SKUs"
+    caption = f"Total {total_rows:,} rows · {n_skus} SKUs · {n_locs} Locations"
     if extra_caption:
         caption += f" · {extra_caption}"
 
@@ -461,7 +475,10 @@ def _render_table(tdf, key, label, extra_caption=""):
     _total_pages = max(1, -(-total_rows // _per_page))
     _page = max(1, min(_page, _total_pages))
     st.session_state[f"page_{key}"] = _page
-    tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+    tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page].copy()
+    # Within-page location sort (only when paginated, not All)
+    if _preset != "All" and "location_no" in tdf_show.columns:
+        tdf_show = tdf_show.sort_values("location_no", ascending=True, na_position="last")
 
     # ── Top bar: caption · Download CSV ──────────────────────
     _c1, _c3 = st.columns([4, 1])
@@ -476,11 +493,14 @@ def _render_table(tdf, key, label, extra_caption=""):
 
     st.dataframe(tdf_show, use_container_width=True)
 
-    # ── Inject CSS: narrow page input ────────────────────────
-    st.markdown("""<style>
-    div[data-testid="stTextInput"] > div > div > input {
-        max-width: 32px !important;
-    }
+    # ── Inject CSS: narrow page input only ───────────────────
+    st.markdown(f"""<style>
+    div[data-testid="stTextInput"][data-key="page_input_{key}"] {{
+        max-width: 70px !important;
+    }}
+    div[data-testid="stTextInput"][data-key="page_input_{key}"] input {{
+        text-align: center; font-size: 0.85rem !important;
+    }}
     </style>""", unsafe_allow_html=True)
 
     # ── Footer: rows/page left · compact page nav right ───────
@@ -564,9 +584,9 @@ with t1:
                 _df_r, _cfg_t1, target_lists=["T1"],
             )
             tdf = _t1_build.get("T1", pd.DataFrame())
-            _t1_label = "TOP=7d · MID=7d (live)"
+            _t1_label = ""
         else:
-            _t1_label = "TOP=7d · MID=7d (cached)"
+            _t1_label = ""
     else:
         # Non-default — rebuild live with slider values (~0.05s)
         _cfg_t1 = dict(cfg)
@@ -583,7 +603,7 @@ with t1:
             _df_r, _cfg_t1, target_lists=["T1"],
         )
         tdf = _t1_build.get("T1", pd.DataFrame())
-        _t1_label = f"TOP={_t1_top}d · MID={_t1_mid}d (live)"
+        _t1_label = ""
 
     if tdf is None or tdf.empty:
         st.info("No T1 tasks.")

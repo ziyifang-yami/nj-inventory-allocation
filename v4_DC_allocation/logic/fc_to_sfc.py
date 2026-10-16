@@ -24,6 +24,8 @@ _LOC_COLS = [
     "item_number",
     "location_no",
     "loc_type",
+    "size_id",
+    "loc_size",
     "qty_to_transfer",
     "qty",
     "exp_date",
@@ -115,39 +117,26 @@ def compute_fc_to_sfc(df_skus: pd.DataFrame, config: dict) -> pd.DataFrame:
 def select_middle_fc_locations(
     df_lot_fc: pd.DataFrame,
     sku_row,
+    cfg: dict | None = None,
 ) -> pd.DataFrame:
     """
     Select which FC lot locations to transfer to SFC for a MIDDLE SKU.
 
+    Stock locations are preferred over Bin. Within each type, locations are
+    sorted qty DESC and selected greedily: a location is included only if
+    cumulative qty after adding it stays within the max transferable amount.
+
+    max_excess = adl × (mid_keep_d2s + mid_evict_buffer_d2s) - fc_qty
+      → FC may drop to keep_target - buffer*adl after transfer (configurable)
+
     Parameters
     ----------
-    df_lot_fc:
-        DataFrame with FC lot data for **one SKU** (pre-filtered by caller).
-        Also accepts the full FC lot table — the function will filter to the
-        SKU identified by ``sku_row["item_number"]``.
-        Required columns: item_number, location_no, loc_type, qty, exp_date,
-                          need_minimal_exp
-    sku_row:
-        Row from ``compute_fc_to_sfc()`` output (or any Series/dict).
-        Must contain: item_number, avg_daily_orders (or adl), keep_qty
-        (keep_qty = ceil(adl × 30); computed from adl when 0).
-
-    Returns
-    -------
-    DataFrame of locations to transfer to SFC.
-    Columns: item_number, location_no, loc_type, qty_to_transfer, qty, exp_date, rule
-
-    Returns empty DataFrame when:
-      - SKU has exactly one FC location  (Req 3.3)
-      - No lots found for SKU
-
-    Rule labels
-    -----------
-    - ``"MIDDLE_EXP_KeepNewest"``  — EXP path transfers (need_minimal_exp = 1)
-    - ``"MIDDLE_NOEXP_KeepBin"``   — No-EXP path transfers (need_minimal_exp = 0)
-
-    Requirements: 3.1, 3.2, 3.3, 3.4
+    cfg:
+        Config dict. Uses "mid_keep_d2s" (default 30) and
+        "mid_evict_buffer_d2s" (default 3).
     """
+    if cfg is None:
+        cfg = {}
     sku = str(
         sku_row.get("item_number") if hasattr(sku_row, "get")
         else getattr(sku_row, "item_number", "")
@@ -180,39 +169,77 @@ def select_middle_fc_locations(
 
     need_exp = int(df_sku["need_minimal_exp"].iloc[0]) if "need_minimal_exp" in df_sku.columns else 0
 
-    # ── Sort order (Req 3.1 / 3.2) ───────────────────────────
-    if need_exp:
-        # EXP path: sort by exp_date ASC — oldest expiry first (keep these)
-        # Req 3.1: accumulate until >= keep_qty; remaining → transfer to SFC
-        df_sorted = df_sku.sort_values("exp_date", ascending=True, na_position="last").reset_index(drop=True)
-        rule_label = "MIDDLE_EXP_KeepNewest"
-    else:
-        # No-EXP path: Bin before Stock, within type by qty DESC (Req 3.2)
-        df_sku["_type_order"] = df_sku["loc_type"].map({"Bin": 0, "Stock": 1}).fillna(2)
-        df_sorted = df_sku.sort_values(
-            ["_type_order", "qty"], ascending=[True, False]
-        ).drop(columns=["_type_order"]).reset_index(drop=True)
-        rule_label = "MIDDLE_NOEXP_KeepBin"
+    total_fc = float(df_sku["qty"].sum())
 
-    # ── Accumulate "keep in FC" until >= keep_target (Req 3.4) ───
-    # The last location that causes cumulative to meet/exceed keep_target is
-    # always kept whole — no partial splits (ceiling rule).
-    cumulative = 0.0
-    keep_indices = []
-    for idx, loc_row in df_sorted.iterrows():
-        if cumulative >= keep_target:
-            break
-        keep_indices.append(idx)
-        cumulative += float(loc_row["qty"])
+    # ── Compute excess with buffer ───────────────────────────
+    # max_excess: how much we're allowed to transfer out.
+    # FC can drop to (keep_target - buffer_qty) after transfer.
+    # buffer_qty = adl × mid_evict_buffer_d2s (default 3d)
+    buffer_d2s = float(cfg.get("mid_evict_buffer_d2s", 3))
+    buffer_qty = adl * buffer_d2s
+    # min_keep: the floor — FC must not drop below this after transfer
+    min_keep   = max(0.0, keep_target - buffer_qty)
+    # excess_qty: max we can transfer out (with buffer)
+    excess_qty = max(0.0, total_fc - min_keep)
 
-    # Transfer = all rows NOT in keep set
-    transfer_mask = ~df_sorted.index.isin(keep_indices)
-    df_transfer = df_sorted[transfer_mask].copy()
-
-    if df_transfer.empty:
+    if excess_qty <= 0:
         return pd.DataFrame(columns=_LOC_COLS)
 
-    # Req 5 (task spec): qty_to_transfer = full lot qty (whole locations only)
+    # ── Sort order: Stock first, then Bin; within type qty DESC ──
+    # Only consider locations whose qty <= excess_qty (whole-location,
+    # single location must not exceed the excess on its own).
+    # EXP SKUs: within each loc_type group, sort by exp_date ASC (FEFO),
+    #           then inv_age_days DESC, then qty DESC.
+    # Non-EXP:  within each loc_type group, sort by inv_age_days DESC
+    #           (oldest stock first), then qty DESC.
+    df_sku["_type_order"] = df_sku["loc_type"].map({"Stock": 0, "Bin": 1}).fillna(2)
+
+    # Filter: only locations whose qty fits within the excess
+    candidates = df_sku[df_sku["qty"] <= excess_qty].copy()
+    if candidates.empty:
+        return pd.DataFrame(columns=_LOC_COLS)
+
+    if need_exp and "exp_date" in candidates.columns:
+        # FEFO first, then tiebreak: Stock before Bin, newest inv first (keep old in FC), largest qty
+        sort_cols = ["exp_date", "_type_order"]
+        sort_asc  = [True, True]
+        if "inv_age_days" in candidates.columns:
+            sort_cols.append("inv_age_days"); sort_asc.append(True)  # ASC = newest first → transfer to SFC
+        sort_cols.append("qty"); sort_asc.append(False)
+        candidates = candidates.sort_values(
+            sort_cols, ascending=sort_asc, na_position="last"
+        ).drop(columns=["_type_order"]).reset_index(drop=True)
+        rule_label = "MIDDLE_EXP_StockFirst"
+    else:
+        # Stock first, within each type: newer inv first (keep old in FC for FIFO)
+        # inv_age_days ASC = newest first → transfer newest to SFC, keep oldest in FC
+        sort_cols = ["_type_order"]
+        sort_asc  = [True]
+        if "inv_age_days" in candidates.columns:
+            sort_cols.append("inv_age_days"); sort_asc.append(True)  # newest first → transfer to SFC
+        sort_cols.append("qty"); sort_asc.append(False)
+        candidates = candidates.sort_values(
+            sort_cols, ascending=sort_asc
+        ).drop(columns=["_type_order"]).reset_index(drop=True)
+        rule_label = "MIDDLE_NOEXP_StockFirst"
+
+    # ── Greedy select: accumulate whole locations until adding next would exceed excess ──
+    selected = []
+    cum = 0.0
+    for _, loc_row in candidates.iterrows():
+        loc_qty = float(loc_row["qty"])
+        if cum + loc_qty <= excess_qty:
+            selected.append(loc_row)
+            cum += loc_qty
+        # skip if adding this location would overshoot — don't break,
+        # maybe a smaller location later still fits
+        if cum >= excess_qty:
+            break
+
+    if not selected:
+        return pd.DataFrame(columns=_LOC_COLS)
+
+    df_transfer = pd.DataFrame(selected)
     df_transfer["qty_to_transfer"] = df_transfer["qty"]
     df_transfer["rule"] = rule_label
 

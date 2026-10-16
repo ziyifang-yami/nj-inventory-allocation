@@ -5,24 +5,29 @@ NJ Inventory Allocation v4
 Assigns each inbound receipt to FC or SFC based on segment,
 FC D2S, SFC stock state, and expiration date comparison.
 
-Decision tree (confirmed 2026-10-01):
+Decision tree (updated 2026-10-14):
 
-    TOP  → FC  (putaway_rule="top_fc")
+    TBD  → No Need To Change Zone (new product, hold at staging)
 
-    TAIL → SFC (putaway_rule="tail_sfc")
+    TOP  → FC  (putaway_rule="TOP_FC")
+
+    TAIL → SFC (putaway_rule="TAIL_SFC")
 
     MIDDLE:
-      1. need_minimal_exp=1 AND new_exp < MIN(fc_exp)
-         → FC  (putaway_rule="mid_exp_earlier_fc")
-         New goods expire earlier than FC's oldest lot — put in FC first (FEFO)
+      1. need_minimal_exp=1 AND new_exp < fc_min_exp
+         → FC  (MID_EXP_EARLIER_FC) — new goods expire earlier than FC stock (FEFO)
 
-      2. No EXP trigger (need_minimal_exp=0 OR new_exp >= MAX(fc_exp)):
-         a. fc_d2s > putaway_d2s (default 28)
-            → SFC (putaway_rule="mid_fc_sufficient")
-         b. fc_d2s <= putaway_d2s AND sfc_qty > 0
-            → SFC (putaway_rule="mid_sfc_has_stock")
-         c. fc_d2s <= putaway_d2s AND sfc_qty == 0
-            → FC  (putaway_rule="mid_sfc_empty")
+      2. fc_d2s > putaway_d2s (default 30)
+         → SFC (MID_FC_D2S_HIGH) — FC has sufficient stock
+
+      3. sfc_qty > 0:
+         a. need_minimal_exp=1 AND new_exp <= sfc_min_exp
+            → FC  (MID_SFC_EXP_EARLIER_FC) — new goods expire earlier/equal to SFC stock (FEFO)
+         b. otherwise
+            → SFC (MID_SFC_HAS_STOCK) — SFC has stock, wait for T2 replenishment
+
+      4. sfc_qty == 0
+         → FC  (MID_SFC_EMPTY) — both FC and SFC low, put in FC directly
 
 Requirements: 8.1 – 8.9
 """
@@ -78,29 +83,33 @@ def decide_putaway(sku_row, config: dict) -> dict:
     new_exp    = _get(sku_row, "new_exp_date", None)
     fc_min_exp = _get(sku_row, "fc_min_exp_date", None)  # oldest FC lot exp date
 
-    # ── Branch 1: TOP ──────────────────────────────────────────────────────────
+    # ── Branch 1: TBD — new products, hold at receiving zone ──────────────────
+    if seg == "TBD":
+        return {
+            "putaway_zone": "No Need To Change Zone",
+            "putaway_rule": "TBD_keep",
+            "putaway_reason": "New product (<30d in stock) — hold at receiving zone until classified",
+        }
+
+    # ── Branch 2: TOP ──────────────────────────────────────────────────────────
     if seg == "TOP":
         return {
             "putaway_zone": "FC",
-            "putaway_rule": "top_fc",
+            "putaway_rule": "TOP_FC",
             "putaway_reason": "TOP SKU — always stock in FC",
         }
 
-    # ── Branch 2: BOTTOM / TAIL ────────────────────────────────────────────────
+    # ── Branch 3: BOTTOM / TAIL ────────────────────────────────────────────────
     if seg in ("TAIL", "BOTTOM"):
         return {
             "putaway_zone": "SFC",
-            "putaway_rule": "tail_sfc",
+            "putaway_rule": "TAIL_SFC",
             "putaway_reason": "TAIL/BOTTOM SKU — always stock in SFC",
         }
 
-    # ── Branch 3: MIDDLE ───────────────────────────────────────────────────────
+    # ── Branch 4: MIDDLE ───────────────────────────────────────────────────────
 
     # Step 1 — EXP check
-    # "need exp check AND has EXP earlier than FC" (diagram YES → FC)
-    # new goods expire earlier (shorter shelf life) than FC's existing stock
-    # → put in FC so it gets consumed first (FEFO)
-    # Compare against fc_min_exp: if new goods still earlier than FC's oldest → definitely to FC
     exp_trigger = (
         need_exp == 1
         and new_exp is not None
@@ -110,7 +119,7 @@ def decide_putaway(sku_row, config: dict) -> dict:
     if exp_trigger:
         return {
             "putaway_zone": "FC",
-            "putaway_rule": "mid_exp_earlier_fc",
+            "putaway_rule": "MID_EXP_EARLIER_FC",
             "putaway_reason": "New goods expire earlier than FC stock — put in FC first (FEFO)",
         }
 
@@ -118,20 +127,31 @@ def decide_putaway(sku_row, config: dict) -> dict:
     if fc_d2s > putaway_d2s:
         return {
             "putaway_zone": "SFC",
-            "putaway_rule": "mid_fc_sufficient",
+            "putaway_rule": "MID_FC_D2S_HIGH",
             "putaway_reason": f"FC has sufficient stock (D2S>{putaway_d2s}) — put new goods in SFC",
         }
 
     if sfc_qty > 0:
+        # Exception: new goods expire earlier/equal to SFC's oldest lot → FC (FEFO)
+        sfc_min_exp = _get(sku_row, "sfc_min_exp_date", None)
+        if (need_exp == 1
+                and new_exp is not None
+                and sfc_min_exp is not None
+                and pd.Timestamp(new_exp) <= pd.Timestamp(sfc_min_exp)):
+            return {
+                "putaway_zone": "FC",
+                "putaway_rule": "MID_SFC_EXP_EARLIER_FC",
+                "putaway_reason": "New goods expire earlier than SFC stock — put in FC first (FEFO)",
+            }
         return {
             "putaway_zone": "SFC",
-            "putaway_rule": "mid_sfc_has_stock",
+            "putaway_rule": "MID_SFC_HAS_STOCK",
             "putaway_reason": "FC needs replenishment but SFC has stock — put in SFC, wait for T2",
         }
 
     return {
         "putaway_zone": "FC",
-        "putaway_rule": "mid_sfc_empty",
+        "putaway_rule": "MID_SFC_EMPTY",
         "putaway_reason": "FC needs replenishment and SFC is empty — put directly in FC",
     }
 
@@ -160,14 +180,15 @@ def run_putaway(
         putaway_zone, putaway_rule, putaway_reason
     """
     df = df_inbound.merge(
-        df_inventory[["item_number", "sfc_qty", "fc_min_exp_date"]],
+        df_inventory[["item_number", "sfc_qty", "fc_min_exp_date", "sfc_min_exp_date"]],
         on="item_number",
         how="left",
     )
 
     # Fill missing inventory fields with safe defaults
     df["sfc_qty"] = df["sfc_qty"].fillna(0)
-    df["fc_min_exp_date"] = df["fc_min_exp_date"].where(df["fc_min_exp_date"].notna(), None)
+    df["fc_min_exp_date"]  = df["fc_min_exp_date"].where(df["fc_min_exp_date"].notna(), None)
+    df["sfc_min_exp_date"] = df["sfc_min_exp_date"].where(df["sfc_min_exp_date"].notna(), None)
 
     results = df.apply(
         lambda row: decide_putaway(row, config),

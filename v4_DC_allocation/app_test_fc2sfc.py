@@ -57,20 +57,9 @@ with st.sidebar:
 
     st.caption("**Triggers** (all SKUs, 30min TTL)")
     st.caption(_age_badge("fc2sfc_triggers", 0.5))
-    st.caption("**Tasks** (lot-level, 1h TTL)")
-    st.caption(_age_badge("fc2sfc_tasks", 1.0))
+    st.caption("**Tasks** (lot-level, ~1h refresh)")
+    st.caption(_age_badge("fc2sfc_tasks", 1.1))
 
-    if st.button("↻ FC→SFC Tasks", key="btn_fc2sfc", use_container_width=True):
-        with st.spinner("Running full refresh (~7 min for full lot query)..."):
-            try:
-                import subprocess, sys as _sys
-                subprocess.run([_sys.executable, "refresh_sfc_cache.py"],
-                               cwd=_HERE, timeout=600)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Failed: {e}")
-
-    st.divider()
     if st.button("🔄 Refresh All Data", key="btn_all", use_container_width=True, type="primary"):
         with st.spinner("Running full refresh (~7 min)..."):
             try:
@@ -141,9 +130,9 @@ with _timed("Classify"):
     df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                             df["fc_qty"] / df["avg_daily_orders"], np.nan)
 
-    # TBD: in-stock days < 30 → not enough sales history
+    # TBD: in-stock days < 30 OR no sales data (NaN) → not enough history
     if "inv_days_30" in df.columns:
-        df.loc[df["inv_days_30"] < 30, "seg"] = "TBD"
+        df.loc[df["inv_days_30"].isna() | (df["inv_days_30"] < 30), "seg"] = "TBD"
 
 # ── Step 4: Trigger counts — read from SQLite fc2sfc_triggers ─────────────────
 with _timed("Triggers"):
@@ -166,8 +155,8 @@ cols_t[-1].metric("**Total**", f"{total:.2f}s")
 
 # ── Display columns — same format as SFC→FC ───────────────────────────────────
 _DISPLAY_COLS = [
-    "segment","item_number","location_no","loc_type","qty_to_transfer",
-    "qty","exp_date","fc_d2s","avg_daily_orders","rule",
+    "segment","item_number","loc_type","location_no","qty_to_transfer","exp_date",
+    "size_id","loc_size","fc_d2s","avg_daily_orders","rule",
 ]
 _COL_RENAME = {}
 
@@ -176,16 +165,18 @@ def _render_tab(tdf, key, label):
         st.info(f"No {label} tasks. Data refreshes every 30 min.")
         return
 
-    # Derive segment from trigger_type (don't merge from df — avoids classification drift)
-    if "segment" not in tdf.columns or tdf["segment"].isna().all():
+    # Derive segment from trigger_type if not already in data
+    if "segment" not in tdf.columns or (tdf["segment"].fillna("") == "").all():
         if "trigger_type" in tdf.columns:
-            tdf["segment"] = tdf["trigger_type"].map({
-                "MIDDLE_EVICT": "MIDDLE",
-                "TAIL_CLEAR":   "TAIL",
-            }).fillna("")
-        elif key == "middle_evict":
+            def _infer_seg(tt):
+                tt = str(tt).upper()
+                if "MIDDLE" in tt: return "MIDDLE"
+                if "TAIL"   in tt: return "TAIL"
+                return ""
+            tdf["segment"] = tdf["trigger_type"].apply(_infer_seg)
+        if key == "middle_evict" and (tdf.get("segment", pd.Series(dtype=str)).fillna("") == "").all():
             tdf["segment"] = "MIDDLE"
-        else:
+        elif key == "tail_clear" and (tdf.get("segment", pd.Series(dtype=str)).fillna("") == "").all():
             tdf["segment"] = "TAIL"
 
     # Backfill fc_d2s + avg_daily_orders from df if missing
@@ -205,15 +196,26 @@ def _render_tab(tdf, key, label):
     tdf  = tdf[cols].copy()
 
     # ── Filters + Rows/Page — single row ─────────────────────
-    _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 1, 1, 0.7])
+    _fc0, _fc1, _fc2, _fc3, _fc4 = st.columns([1.2, 0.9, 0.9, 1.1, 0.7])
+    with _fc0:
+        _s = st.text_input("🔍 SKU", key=f"s_{key}", placeholder="Item #")
     with _fc1:
-        _s = st.text_input("🔍 SKU", key=f"s_{key}", placeholder="Item number")
-    with _fc2:
         _segs = ["All"] + sorted(tdf["segment"].dropna().unique().tolist()) if "segment" in tdf.columns else ["All"]
         _sf = st.selectbox("Segment", _segs, key=f"sf_{key}")
-    with _fc3:
+    with _fc2:
         _locs = ["All"] + sorted(tdf["loc_type"].dropna().unique().tolist()) if "loc_type" in tdf.columns else ["All"]
         _lf = st.selectbox("Loc Type", _locs, key=f"lf_{key}")
+    with _fc3:
+        # Loc Size options are filtered by currently selected Segment + Loc Type (linked dropdowns)
+        _seg_cur = st.session_state.get(f"sf_{key}", "All")
+        _lf_cur  = st.session_state.get(f"lf_{key}", "All")
+        _preview = tdf.copy()
+        if _seg_cur != "All" and "segment" in _preview.columns:
+            _preview = _preview[_preview["segment"] == _seg_cur]
+        if _lf_cur != "All" and "loc_type" in _preview.columns:
+            _preview = _preview[_preview["loc_type"] == _lf_cur]
+        _ls_opts = ["All"] + sorted(_preview["loc_size"].dropna().unique().tolist()) if "loc_size" in _preview.columns else ["All"]
+        _lsf = st.selectbox("Loc Size", _ls_opts, key=f"lsf_{key}")
     with _fc4:
         st.selectbox("Rows/Page", options=[50, 100, 200, 500, "All"],
                      index=1, key=f"rowlimit_{key}", label_visibility="visible")
@@ -224,25 +226,42 @@ def _render_tab(tdf, key, label):
         tdf = tdf[tdf["segment"] == _sf]
     if _lf != "All" and "loc_type" in tdf.columns:
         tdf = tdf[tdf["loc_type"] == _lf]
+    if _lsf != "All" and "loc_size" in tdf.columns:
+        tdf = tdf[tdf["loc_size"] == _lsf]
 
-    # Sort: location_no ASC
+    # Sort: avg_daily_orders ASC → location_no ASC
+    sort_cols = []
+    if "avg_daily_orders" in tdf.columns:
+        tdf["avg_daily_orders"] = pd.to_numeric(tdf["avg_daily_orders"], errors="coerce")
+        sort_cols.append("avg_daily_orders")
     if "location_no" in tdf.columns:
-        tdf = tdf.sort_values("location_no", ascending=True, na_position="last")
+        sort_cols.append("location_no")
+    if sort_cols:
+        tdf = tdf.sort_values(sort_cols, ascending=True, na_position="last")
     tdf = tdf.reset_index(drop=True)
     tdf.index = tdf.index + 1
     tdf = tdf.rename(columns=_COL_RENAME)
 
     # ── Pagination state ──────────────────────────────────────
+    # Reset to page 1 if any filter changed
+    _filter_state = (_s, _sf, _lf, _lsf)
+    if st.session_state.get(f"filter_{key}") != _filter_state:
+        st.session_state[f"page_{key}"] = 1
+        st.session_state[f"filter_{key}"] = _filter_state
     total_rows = len(tdf)
     n_skus = tdf["item_number"].nunique() if "item_number" in tdf.columns else "?"
-    caption = f"Total {total_rows:,} rows · {n_skus} SKUs"
+    n_locs = tdf["location_no"].nunique() if "location_no" in tdf.columns else "?"
+    caption = f"Total {total_rows:,} rows · {n_skus} SKUs · {n_locs} Locations"
     _preset = st.session_state.get(f"rowlimit_{key}", 100)
     _page   = st.session_state.get(f"page_{key}", 1)
     _per_page = total_rows if _preset == "All" else int(_preset)
     _total_pages = max(1, -(-total_rows // _per_page))
     _page = max(1, min(_page, _total_pages))
     st.session_state[f"page_{key}"] = _page
-    tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page]
+    tdf_show = tdf.iloc[(_page - 1) * _per_page : _page * _per_page].copy()
+    # Within-page location sort (only when paginated, not All)
+    if _preset != "All" and "location_no" in tdf_show.columns:
+        tdf_show = tdf_show.sort_values("location_no", ascending=True, na_position="last")
 
     # ── Caption + Download ────────────────────────────────────
     _cap_col, _dl_col = st.columns([4, 1])
@@ -258,19 +277,26 @@ def _render_tab(tdf, key, label):
     st.dataframe(tdf_show, use_container_width=True)
 
     # ── CSS + page nav ────────────────────────────────────────
-    st.markdown("""<style>
-    div[data-testid="stTextInput"] > div > div > input { max-width: 32px !important; }
+    # Constrain page number input block width
+    st.markdown(f"""<style>
+    div[data-testid="stTextInput"][data-key="page_input_{key}"] {{
+        max-width: 70px !important;
+    }}
+    div[data-testid="stTextInput"][data-key="page_input_{key}"] input {{
+        text-align: center;
+        font-size: 1.2rem !important;
+    }}
     </style>""", unsafe_allow_html=True)
 
     if _total_pages > 1:
-        _nav_left, _nav_right = st.columns([5.0, 0.8])
+        _nav_left, _nav_right = st.columns([6, 1.5])
         with _nav_right:
-            _n1, _n2, _n3, _n4, _n5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.2])
+            _n1, _n2, _n3, _n4, _n5 = st.columns([0.2, 0.2, 0.2, 0.2, 0.4])
             with _n1:
                 if st.button("‹", key=f"prev_{key}", disabled=_page == 1):
                     st.session_state[f"page_{key}"] = _page - 1; st.rerun()
             with _n2:
-                st.markdown('<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
+                st.markdown('<p style="font-size:1.2rem;color:#555;margin:0;padding-top:3px;white-space:nowrap">Page</p>', unsafe_allow_html=True)
             with _n3:
                 _go = st.text_input("pg", value=str(_page), key=f"page_input_{key}", label_visibility="collapsed")
                 try:
@@ -280,7 +306,7 @@ def _render_tab(tdf, key, label):
                 except ValueError:
                     pass
             with _n4:
-                st.markdown(f'<p style="font-size:1rem;color:#555;margin:0;padding-top:8px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
+                st.markdown(f'<p style="font-size:1.2rem;color:#555;margin:0;padding-top:3px;white-space:nowrap">/ {_total_pages}</p>', unsafe_allow_html=True)
             with _n5:
                 if st.button("›", key=f"next_{key}", disabled=_page == _total_pages):
                     st.session_state[f"page_{key}"] = _page + 1; st.rerun()

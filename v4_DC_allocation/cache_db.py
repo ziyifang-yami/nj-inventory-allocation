@@ -96,6 +96,9 @@ CREATE TABLE IF NOT EXISTS fc2sfc_tasks (
     item_number      TEXT,
     location_no      TEXT,
     loc_type         TEXT,
+    size_id          INTEGER,
+    loc_size         TEXT,
+    segment          TEXT,
     qty_to_transfer  REAL,
     qty              REAL,
     exp_date         TEXT,
@@ -166,6 +169,14 @@ class CacheDB:
     def _init(self):
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            # Migration: add columns if missing
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(fc2sfc_tasks)").fetchall()}
+            if "size_id" not in existing:
+                conn.execute("ALTER TABLE fc2sfc_tasks ADD COLUMN size_id INTEGER")
+            if "loc_size" not in existing:
+                conn.execute("ALTER TABLE fc2sfc_tasks ADD COLUMN loc_size TEXT")
+            if "segment" not in existing:
+                conn.execute("ALTER TABLE fc2sfc_tasks ADD COLUMN segment TEXT")
 
     # ── Age ───────────────────────────────────────────────────────────────────
 
@@ -244,14 +255,18 @@ class CacheDB:
             if df is not None and not df.empty:
                 df = df.copy()
                 df["item_number"] = df["item_number"].astype(str)
-                for col in ["item_number","location_no","waiting_putaway_qty","po_reference","last_update"]:
+                for col in ["item_number","location_no","waiting_putaway_qty","po_reference","last_update","bt_number","gt_number"]:
                     if col not in df.columns:
                         df[col] = None
                 if "last_update" in df.columns:
                     df["last_update"] = df["last_update"].astype(str).replace("NaT","")
                 rows = df[["item_number","location_no","waiting_putaway_qty","po_reference","last_update"]].values.tolist()
                 conn.executemany("INSERT OR REPLACE INTO pending_putaway VALUES(?,?,?,?,?)", rows)
-            # Always write meta so age is real (0 rows = genuinely empty, not "never run")
+                # Store BT/GT in a separate lightweight lookup table
+                conn.execute("CREATE TABLE IF NOT EXISTS pending_putaway_bt (item_number TEXT PRIMARY KEY, bt_number TEXT, gt_number TEXT)")
+                conn.execute("DELETE FROM pending_putaway_bt")
+                bt_rows = df[["item_number","bt_number","gt_number"]].values.tolist()
+                conn.executemany("INSERT OR REPLACE INTO pending_putaway_bt VALUES(?,?,?)", bt_rows)
             conn.execute(
                 "INSERT OR REPLACE INTO meta(table_name, updated_at) VALUES(?,?)",
                 ("pending_putaway", datetime.now(UTC).isoformat()),
@@ -259,9 +274,13 @@ class CacheDB:
 
     def read_pending_putaway(self) -> pd.DataFrame:
         with self._conn() as conn:
+            # Create bt table if it doesn't exist yet (migration-safe)
+            conn.execute("CREATE TABLE IF NOT EXISTS pending_putaway_bt (item_number TEXT PRIMARY KEY, bt_number TEXT, gt_number TEXT)")
             cur = conn.execute(
-                "SELECT item_number,location_no,waiting_putaway_qty,po_reference,last_update "
-                "FROM pending_putaway"
+                "SELECT p.item_number, p.location_no, p.waiting_putaway_qty, p.po_reference, p.last_update, "
+                "b.bt_number, b.gt_number "
+                "FROM pending_putaway p "
+                "LEFT JOIN pending_putaway_bt b ON b.item_number = p.item_number"
             )
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
@@ -314,9 +333,9 @@ class CacheDB:
     # ── FC→SFC tasks ──────────────────────────────────────────────────────────
 
     _FC2SFC_COLS = [
-        "list_id","item_number","location_no","loc_type","qty_to_transfer","qty",
-        "exp_date","rule","trigger_type","excess_qty","keep_qty",
-        "fc_d2s","avg_daily_orders","excess_vol",
+        "list_id","item_number","location_no","loc_type","size_id","loc_size","segment",
+        "qty_to_transfer","qty","exp_date","rule","trigger_type",
+        "excess_qty","keep_qty","fc_d2s","avg_daily_orders","excess_vol",
     ]
 
     def write_fc2sfc_tasks(self, task_lists: dict):
@@ -339,10 +358,15 @@ class CacheDB:
             ph = ",".join("?" * len(list_ids))
             if rows:
                 new_data = pd.concat(rows, ignore_index=True)
-                new_data.to_sql("fc2sfc_staging", conn, if_exists="replace", index=False)
+                # Use named INSERT to avoid column-position mismatch
+                # (ALTER TABLE adds columns at end, _FC2SFC_COLS order may differ)
+                cols_sql = ",".join(self._FC2SFC_COLS)
+                placeholders = ",".join("?" * len(self._FC2SFC_COLS))
                 conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
-                conn.execute("INSERT INTO fc2sfc_tasks SELECT * FROM fc2sfc_staging")
-                conn.execute("DROP TABLE IF EXISTS fc2sfc_staging")
+                conn.executemany(
+                    f"INSERT INTO fc2sfc_tasks ({cols_sql}) VALUES ({placeholders})",
+                    new_data[self._FC2SFC_COLS].itertuples(index=False, name=None)
+                )
             else:
                 conn.execute(f"DELETE FROM fc2sfc_tasks WHERE list_id IN ({ph})", list_ids)
             conn.execute(
@@ -353,8 +377,8 @@ class CacheDB:
     def read_fc2sfc_task(self, list_id: str) -> pd.DataFrame:
         with self._conn() as conn:
             cur = conn.execute(
-                "SELECT item_number,location_no,loc_type,qty_to_transfer,qty,"
-                "exp_date,rule,trigger_type,excess_qty,keep_qty,"
+                "SELECT item_number,location_no,loc_type,size_id,loc_size,segment,"
+                "qty_to_transfer,qty,exp_date,rule,trigger_type,excess_qty,keep_qty,"
                 "fc_d2s,avg_daily_orders,excess_vol "
                 "FROM fc2sfc_tasks WHERE list_id=?", (list_id,)
             )

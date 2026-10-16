@@ -236,94 +236,85 @@ def select_middle_sfc_locations(
     """
     Compute qty_to_transfer for each SFC lot row.
 
-    T1 mid_emergency / T2 mid_routine → case-round toward mid_target_d2s
-    T3 mid_bin_to_stock / T4 mid_stock_to_fc / T1 mid_zone_fallback → full qty
+    T3 mid_bin_to_stock / T4 mid_stock_to_fc / T1 mid_zone_fallback:
+        → Full qty of ALL selected lots (already filtered to only relevant lots).
+
+    T1 mid_emergency / T2 mid_routine:
+        → Greedy: sort lots, pick whole locations one by one until cumulative
+          qty meets the target. Each selected location is taken in FULL —
+          no partial splits. Stop as soon as one more location would overshoot
+          but we still need at least one more.
+        → If total SFC <= needed: take everything.
     """
     if lots.empty:
         return pd.DataFrame()
 
     lots = lots.copy()
+    need_exp = int(sku_row.get("need_minimal_exp", 0) or 0)
 
+    # T3, T4, mid_zone_fallback — always full qty of passed lots
     if source_type in ("mid_bin_to_stock", "mid_stock_to_fc", "mid_zone_fallback"):
         lots["qty_to_transfer"] = lots["qty"]
         lots["rule"] = source_type
-        # FEFO sort for EXP SKUs — earliest expiry first, then qty DESC
-        need_exp = int(sku_row.get("need_minimal_exp", 0) or 0)
         if need_exp and "exp_date" in lots.columns:
             lots = lots.sort_values(
                 ["exp_date", "qty"], ascending=[True, False], na_position="last"
             ).reset_index(drop=True)
         return lots
 
-    # mid_emergency or mid_routine: case-rounding toward target
-    fc_qty      = float(sku_row.get("fc_qty", 0) or 0)
-    adl         = float(sku_row.get("avg_daily_orders", 0) or 0)
-    # T1 emergency uses t1_mid_target_d2s if set, otherwise mid_target_d2s
+    # T1 mid_emergency / T2 mid_routine: greedy whole-location selection
+    fc_qty = float(sku_row.get("fc_qty", 0) or 0)
+    adl    = float(sku_row.get("avg_daily_orders", 0) or 0)
     if source_type == "mid_emergency":
         target_d2s = cfg.get("t1_mid_target_d2s", cfg.get("mid_target_d2s", 28))
     else:
         target_d2s = cfg.get("mid_target_d2s", 28)
-    needed      = max(0.0, math.ceil(adl * target_d2s) - fc_qty) if adl > 0 else 0.0
+    needed = max(0.0, adl * target_d2s - fc_qty) if adl > 0 else 0.0
 
-    sfc_total   = float(lots["qty"].sum())
+    sfc_total = float(lots["qty"].sum())
     if sfc_total <= 0:
         return pd.DataFrame()
 
-    if sfc_total <= needed:
-        # Not enough SFC — transfer everything
+    # If we already have enough in FC or total SFC <= needed → take everything
+    if needed <= 0 or sfc_total <= needed:
         lots["qty_to_transfer"] = lots["qty"]
-        lots["rule"] = source_type + "_all"
+        lots["rule"] = source_type
         return lots
 
-    # Sort lots for greedy selection:
-    # When need_minimal_exp=1 → FEFO first (exp_date ASC), then loc_type, then qty DESC
-    # Otherwise              → loc_type first, then qty DESC
-    need_exp = int(sku_row.get("need_minimal_exp", 0) or 0)
-
+    # Sort lots for greedy selection (same order as before, but now whole-loc)
+    # Stock before Bin: Stock=0, Bin=1 (prefer to pull from Stock first)
     if source_type == "mid_emergency":
-        lots["_sort_key"] = lots["loc_type"].map({"Bin": 0, "Stock": 1})
+        lots["_sort_key"] = lots["loc_type"].map({"Stock": 0, "Bin": 1}).fillna(1)
     else:
-        lots["_sort_key"] = 1  # stock only
+        lots["_sort_key"] = 0  # stock only
 
     if need_exp and "exp_date" in lots.columns:
-        # FEFO: earliest expiry first, then loc_type, then qty DESC
         lots = lots.sort_values(
             ["exp_date", "_sort_key", "qty"],
-            ascending=[True, True, False],
-            na_position="last",   # NaT (no exp date) goes last
+            ascending=[True, True, False], na_position="last"
         ).drop(columns=["_sort_key"]).reset_index(drop=True)
     else:
         lots = lots.sort_values(
             ["_sort_key", "qty"], ascending=[True, False]
         ).drop(columns=["_sort_key"]).reset_index(drop=True)
 
-    rows_out = []
+    # Greedy: pick whole locations until cumulative qty >= needed
+    selected = []
     cum = 0.0
     for _, lot in lots.iterrows():
         if cum >= needed:
             break
-        remaining = needed - cum
-        case_qty   = max(int(lot.get("case_qty", 1) or 1), 1)
-        lot_qty    = float(lot["qty"])
+        # Take the entire location — no partial split
+        selected.append(lot)
+        cum += float(lot["qty"])
 
-        if lot_qty <= case_qty:
-            # Smaller than one case → take whole lot
-            xfer = lot_qty
-        elif cum + lot_qty <= needed:
-            # Full lot fits within needed
-            xfer = lot_qty
-        else:
-            # Last lot: ceil to case_qty
-            xfer = _ceil_to_case(remaining, case_qty)
-            xfer = min(xfer, lot_qty)  # can't exceed lot qty
+    if not selected:
+        return pd.DataFrame()
 
-        row = lot.to_dict()
-        row["qty_to_transfer"] = xfer
-        row["rule"] = source_type
-        rows_out.append(row)
-        cum += xfer
-
-    return pd.DataFrame(rows_out)
+    result = pd.DataFrame(selected)
+    result["qty_to_transfer"] = result["qty"]
+    result["rule"] = source_type
+    return result.reset_index(drop=True)
 
 
 def build_middle_lists(
@@ -369,6 +360,12 @@ def build_middle_lists(
         # O(1) dict lookup instead of full-table boolean filter
         sku_lots = lots_by_item.get(item)
         if sku_lots is None or sku_lots.empty:
+            continue
+
+        # Exclude V-prefix locations
+        if "location_no" in sku_lots.columns:
+            sku_lots = sku_lots[~sku_lots["location_no"].astype(str).str.startswith("V")]
+        if sku_lots.empty:
             continue
 
         route = route_middle_sku(sku_row, sku_lots, fc_min_exp)
@@ -440,18 +437,18 @@ def _fefo_aware_sort(df: pd.DataFrame, sort_cols: list, sort_asc: list) -> pd.Da
 
 
 def _sort_t1(df: pd.DataFrame) -> pd.DataFrame:
-    """T1: [EXP→FEFO first] OL DESC → ADL DESC → location_no ASC"""
+    """T1: [EXP→FEFO first] FC D2S ASC → OL DESC → ADL DESC"""
     cols, asc = [], []
-    for c in ["order_lines_30d", "avg_daily_orders"]:
+    if "fc_d2s" in df.columns:
+        cols.append("fc_d2s"); asc.append(True)
+    for c, a in [("order_lines_30d", False), ("avg_daily_orders", False)]:
         if c in df.columns:
-            cols.append(c); asc.append(False)
-    if "location_no" in df.columns:
-        cols.append("location_no"); asc.append(True)
+            cols.append(c); asc.append(a)
     return _fefo_aware_sort(df, cols, asc)
 
 
 def _sort_t2_top(df: pd.DataFrame) -> pd.DataFrame:
-    """T2 TOP: [EXP→FEFO first] OL DESC → ADL DESC → location_no ASC"""
+    """T2 TOP: [EXP→FEFO first] FC D2S ASC → OL DESC → ADL DESC"""
     return _sort_t1(df)
 
 
@@ -552,6 +549,12 @@ def build_sfc_to_fc_lists(
         if locs is None or locs.empty:
             continue
 
+        # Exclude V-prefix locations (e.g. virtual/staging locations)
+        if "location_no" in locs.columns:
+            locs = locs[~locs["location_no"].astype(str).str.startswith("V")]
+        if locs.empty:
+            continue
+
         fc_d2s_val = fc_d2s if not pd.isna(fc_d2s) else 999.0
 
         # T4: EXP trigger, SFC worse (any loc_type)
@@ -581,41 +584,38 @@ def build_sfc_to_fc_lists(
 
         ok = ok.copy()
         # FEFO sort within ok lots when EXP SKU — earliest exp first, then qty DESC
+        # Non-EXP: Stock before Bin (Stock=0, Bin=1), then qty DESC within each type
         if need_exp and "exp_date" in ok.columns:
             ok = ok.sort_values(
                 ["exp_date", "qty"], ascending=[True, False], na_position="last"
-            )
-
-        # For T1 (fc_d2s < 3): cap qty at t1_top_target_d2s, case-rounded
-        # For T2 (fc_d2s >= 3): transfer full SFC qty (no cap)
-        adl_top    = float(sku.get("avg_daily_orders", 0) or 0)
-        fc_qty_top = float(sku.get("fc_qty", 0) or 0)
+            ).reset_index(drop=True)
+        else:
+            ok["_loc_order"] = ok["loc_type"].map({"Stock": 0, "Bin": 1}).fillna(1)
+            ok = ok.sort_values(["_loc_order", "qty"], ascending=[True, False]).drop(columns=["_loc_order"]).reset_index(drop=True)
 
         if fc_d2s_val < 3:
-            _t1_target = cfg.get("t1_top_target_d2s")
-            if _t1_target and adl_top > 0:
-                needed_top = max(0.0, adl_top * _t1_target - fc_qty_top)
-                total_sfc  = float(ok["qty"].sum())
-                if 0 < needed_top < total_sfc:
-                    # Greedy fill to needed_top, case-rounded per lot
-                    rows_top, cum = [], 0.0
-                    for _, lot in ok.iterrows():
-                        if cum >= needed_top:
-                            break
-                        case_qty  = max(int(lot.get("case_qty", 1) or 1), 1)
-                        lot_qty   = float(lot["qty"])
-                        remaining = needed_top - cum
-                        xfer = lot_qty if cum + lot_qty <= needed_top else min(_ceil_to_case(remaining, case_qty), lot_qty)
-                        r = lot.to_dict()
-                        r["qty_to_transfer"] = xfer
-                        rows_top.append(r)
-                        cum += xfer
-                    ok = pd.DataFrame(rows_top)
-                else:
-                    ok["qty_to_transfer"] = ok["qty"]
+            # T1: greedy whole-location selection until we have enough
+            adl_top    = float(sku.get("avg_daily_orders", 0) or 0)
+            fc_qty_top = float(sku.get("fc_qty", 0) or 0)
+            t1_target  = cfg.get("t1_top_target_d2s", cfg.get("mid_target_d2s", 28))
+            needed_top = max(0.0, adl_top * t1_target - fc_qty_top) if adl_top > 0 else 0.0
+            sfc_total  = float(ok["qty"].sum())
+
+            if needed_top <= 0 or sfc_total <= needed_top:
+                # Take everything
+                ok["qty_to_transfer"] = ok["qty"]
             else:
+                # Pick whole locations until cumulative >= needed_top
+                selected, cum = [], 0.0
+                for _, lot in ok.iterrows():
+                    if cum >= needed_top:
+                        break
+                    selected.append(lot)
+                    cum += float(lot["qty"])
+                ok = pd.DataFrame(selected)
                 ok["qty_to_transfer"] = ok["qty"]
         else:
+            # T2: take all ok lots (full replenishment)
             ok["qty_to_transfer"] = ok["qty"]
 
         ok["avg_daily_orders"] = sku.get("avg_daily_orders")
