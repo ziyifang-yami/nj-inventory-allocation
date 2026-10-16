@@ -71,9 +71,17 @@ Rebuilt every 30 min by `refresh_sfc_cache.py`. Tables:
 
 ### Step 1 — Classify by sales data
 
+All classification is based on a **rolling window of the most recent 30 days where the SKU had inventory** (`available_qty > 0`). These 30 days are **not necessarily consecutive** — they are the latest 30 calendar dates on which the SKU was in stock, regardless of gaps.
+
+Within this window:
+- `inv_days_30` — count of those days (30 if the SKU has at least 30 in-stock days in history; < 30 if it's a newer product)
+- `active_order_days` — how many of those 30 days had actual sales orders
+- `order_lines_30d` — total order lines across those 30 days
+- `avg_daily_orders` — `order_lines_30d / 30`
+
 ```python
 # Thresholds (hardcoded in refresh_sfc_cache.py)
-AOD_TOP  = 21    # active_order_days >= 21  (active_order_days from Athena)
+AOD_TOP  = 21    # active_order_days >= 21
 OL_TOP   = 100   # order_lines_30d  >= 100  ← NOTE: differs from config.P["ol_top"]=30
 OL_TAIL  = 4     # order_lines_30d  < 4     ← NOTE: differs from config.P["ol_tail"]=8
 
@@ -85,9 +93,12 @@ seg = "TOP"    if active_order_days >= 21 AND order_lines_30d >= 100
 ### Step 2 — Override with TBD
 
 ```python
-# TBD: insufficient data to classify reliably
-tbd_mask = inv_days_30 is NaN    # No Athena record (brand new product)
-        OR inv_days_30 < 30      # Has been in stock fewer than 30 days
+# TBD: the SKU has not yet accumulated 30 in-stock days in its history
+# inv_days_30 < 30 means this is a new product that hasn't been through
+# a full rolling 30-day in-stock window yet — insufficient data to classify.
+# inv_days_30 = NaN means the SKU has no Athena record at all (never been in stock).
+tbd_mask = inv_days_30 is NaN
+        OR inv_days_30 < 30
 
 if tbd_mask:
     seg = "TBD"  # overrides TOP/MIDDLE/TAIL
@@ -106,11 +117,13 @@ if tbd_mask:
 
 ### Data fields used in classification
 
+All fields below are computed over the **rolling window of the most recent 30 in-stock days** (not necessarily consecutive — the latest 30 calendar dates with `available_qty > 0`):
+
 | Field | Source | Description |
 |-------|--------|-------------|
-| `inv_days_30` | Athena `inventory_record` | Days with inventory in last 30d |
-| `active_order_days` | Athena `trade_item_sale_agg_daily` | Days with orders in last 30d |
-| `order_lines_30d` | Athena `trade_item_sale_agg_daily` | Total order lines in 30d |
+| `inv_days_30` | Athena `inventory_record` | Count of those in-stock days (< 30 = new product → TBD) |
+| `active_order_days` | Athena `trade_item_sale_agg_daily` | Days within that window with actual sales orders |
+| `order_lines_30d` | Athena `trade_item_sale_agg_daily` | Total order lines within that window |
 | `avg_daily_orders` | Computed: `order_lines_30d / 30` | Used for D2S calculations |
 
 ---
