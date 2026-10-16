@@ -83,13 +83,13 @@ Within this window:
 - `avg_daily_orders` — `order_lines_30d / 30`
 
 ```python
-# Thresholds (hardcoded in refresh_sfc_cache.py)
-AOD_TOP  = 21    # active_order_days >= 21
-OL_TOP   = 100   # order_lines_30d  >= 100  ← NOTE: differs from config.P["ol_top"]=30
-OL_TAIL  = 4     # order_lines_30d  < 4     ← NOTE: differs from config.P["ol_tail"]=8
+# Thresholds — read from config.P (aligned 2026-10-16)
+AOD_TOP  = P["aod_top"]   # 21   active_order_days >= 21
+OL_TOP   = P["ol_top"]    # 30   order_lines_30d  >= 30
+OL_TAIL  = P["ol_tail"]   #  8   order_lines_30d  < 8
 
-seg = "TOP"    if active_order_days >= 21 AND order_lines_30d >= 100
-    = "TAIL"   if order_lines_30d < 4
+seg = "TOP"    if active_order_days >= 21 AND order_lines_30d >= 30
+    = "TAIL"   if order_lines_30d < 8
     = "MIDDLE" otherwise
 ```
 
@@ -114,11 +114,9 @@ if tbd_mask:
 | Segment | Primary Condition | Override |
 |---------|-------------------|---------|
 | **TBD** | `inv_days_30 < 30` or NaN | Applied last — overrides all |
-| **TOP** | `active_order_days ≥ 21` AND `order_lines_30d ≥ 100` | — |
-| **TAIL** | `order_lines_30d < 4` | — |
+| **TOP** | `active_order_days ≥ 21` AND `order_lines_30d ≥ 30` | — |
+| **TAIL** | `order_lines_30d < 8` | — |
 | **MIDDLE** | Everything else | — |
-
-> **⚠️ Note:** `config.py` has `ol_top=30, ol_tail=8` but `refresh_sfc_cache.py` hardcodes `OL_TOP=100, OL_TAIL=4`. The cache refresh uses the hardcoded values. The UI threshold simulator uses `config.P` for display only.
 
 ### Data fields used in classification
 
@@ -138,6 +136,8 @@ All fields below are computed over the **rolling window of the most recent 30 in
 ```python
 fc_d2s = fc_qty / avg_daily_orders   # NaN if avg_daily_orders = 0
 ```
+
+> **Note on TAIL with `avg_daily_orders = 0`:** TAIL includes SKUs where `order_lines_30d = 0` (no sales in the rolling window). This covers: (1) zero-sales SKUs with live inventory, (2) SKUs missing from Athena sales data (filled as 0 after merge). These SKUs will still be fully cleared from FC → SFC, but SFC→FC transfers won't happen since `needed = 0 × 28 - fc_qty = 0`.
 
 Used as the primary trigger for all transfer decisions.
 
@@ -244,9 +244,9 @@ MIDDLE (in order):
 
 | Parameter | Value | Used By |
 |-----------|-------|---------|
-| `aod_top` | 21 | UI simulator (not cache refresh) |
-| `ol_top` | 30 | UI simulator only |
-| `ol_tail` | 8 | UI simulator only |
+| `aod_top` | 21 | TOP: active_order_days threshold (used by both refresh and UI) |
+| `ol_top` | 30 | TOP: order_lines_30d threshold |
+| `ol_tail` | 8 | TAIL: order_lines_30d below this |
 | `mid_evict_d2s` | 30 | FC→SFC trigger |
 | `mid_keep_d2s` | 30 | FC→SFC keep target |
 | `mid_evict_buffer_d2s` | 3 | FC→SFC buffer |

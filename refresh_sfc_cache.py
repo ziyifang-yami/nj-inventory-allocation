@@ -88,6 +88,7 @@ except BlockingIOError:
 print(f"\n[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Starting SFC cache refresh...")
 
 from cache_db import CacheDB
+from config import P
 DB_PATH = Path("results/sfc_cache.db")
 db = CacheDB(DB_PATH)
 
@@ -187,7 +188,9 @@ for c in ["active_order_days","order_lines_30d","avg_daily_orders","sales_units_
 
 df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                         df["fc_qty"] / df["avg_daily_orders"], np.nan)
-AOD_TOP, OL_TOP, OL_TAIL = 21, 100, 4
+AOD_TOP  = P.get("aod_top",  21)
+OL_TOP   = P.get("ol_top",   30)
+OL_TAIL  = P.get("ol_tail",   8)
 _aod = df["active_order_days"].to_numpy(float)
 _ol  = df["order_lines_30d"].to_numpy(float)
 df["seg"] = np.where((_aod >= AOD_TOP) & (_ol >= OL_TOP), "TOP",
