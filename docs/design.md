@@ -375,7 +375,7 @@ Receiving
 | `mid_emergency_d2s` | 3 | T1 紧急触发线（fc_d2s < 此值） |
 | `mid_replen_d2s` | 14 | T2 MIDDLE 常规触发线（fc_d2s < 此值） |
 | `min_loc_qty` | 5 | 单库位最小转移量阈值（低于此值的库位跳过） |
-| `putaway_d2s` | 28 | Putaway MIDDLE 判断 FC 是否已够的 D2S 阈值 |
+| `putaway_d2s` | 30 | Putaway MIDDLE 判断 FC 是否已够的 D2S 阈值 |
 
 ---
 
@@ -666,21 +666,14 @@ SKU 级别的 `loc_count`、`total_vol` 统计缓存 30 分钟。
 | `item_number` | `wh_storage_location_item` | yamibuy_wh | varchar(15) | 商品编号 | JOIN 键 |
 | `quantity` | `wh_inventory_transaction` | yamibuy_wh | int | 总库存 | 库存数量 |
 
-### 9.2 关键 BUG 记录 ⚠️
+### 9.2 已修复 BUG 记录 ✅ (2026-10-14)
 
-**`loader.py` 中的 JOIN 错误（待修复）：**
+**`loader.py` JOIN 错误（已修复）：**
 
-```sql
--- ❌ 现有错误写法（0行匹配，source_number 格式 ≠ inbound_number 格式）
-LEFT JOIN yamibuy_wh.wh_inbound_batch ib ON ib.inbound_number = lm.source_number
+之前错误地用 `ib.inbound_number = lm.source_number` 做关联（格式不匹配，0行结果）。
+已改为正确写法：`ib.lot_id = li.lot_id`。
 
--- ✅ 正确写法（通过 lot_id 直接关联）
-LEFT JOIN yamibuy_wh.wh_inbound_batch ib ON ib.lot_id = li.lot_id
-```
-
-`source_number` 格式（`002xxxxxxxxx` 或 `Fxxxxxxxxx`）与 `inbound_number` 格式（`IB24123195`）完全不同，无法 JOIN。正确做法是直接用 `wh_inbound_batch.lot_id = wh_lot_inventory.lot_id`。
-
-**影响范围：** 当前 `load_fc_lot_data()` 和 `load_sfc_lot_data()` 的 `exp_date` 和 `inv_age_days` 全部是 NULL，因为 JOIN 不通。
+验证结果：修复后 FC lot rows with exp_date ≈ 46,154 行，数据正常。
 
 ### 9.3 待验证字段 ⬜
 
