@@ -88,15 +88,20 @@ nj-inventory-allocation/
 
 ### SKU 分段分类
 
+**数据窗口：** 所有分类指标基于同一滚动窗口 — **该 SKU 最近 30 个有库存的日历天**（`available_qty > 0`，缺货日不计入，不要求连续）。
+
 | 分段 | 判定条件 | 转移行为 |
 |------|----------|----------|
-| **TBD** | `inv_days_30 < 30` 或无 Athena 数据 | 不转移 — 等待下次分类 |
-| **TOP** | `active_order_days ≥ 21` 且 `order_lines_30d ≥ 100` | SFC 全量 → FC |
-| **TAIL** | `order_lines_30d < 4` | FC 全量 → SFC（清仓） |
+| **TBD** | `inv_days_30 < 30` 或无 Athena 数据 | 不转移 — 在库历史不足 30 天（新品），等待分类 |
+| **TOP** | `active_order_days ≥ 21` 且 `order_lines_30d ≥ 30` | SFC 全量 → FC |
+| **TAIL** | `order_lines_30d < 8` | FC 全量 → SFC（清仓） |
 | **MIDDLE** | 其余 | 按 D2S 双向转移 |
 
-> ⚠️ `refresh_sfc_cache.py` 中阈值为硬编码（`OL_TOP=100, OL_TAIL=4`）。  
-> `config.py` 中的值（`ol_top=30, ol_tail=8`）仅供 UI 模拟器使用。
+**字段定义：**
+- `inv_days_30` — 最近 30 个有库存日期的天数（上限 30；< 30 = 新品 → TBD）
+- `active_order_days` — 上述 30 个有库存日期中，实际有订单的天数（≤ `inv_days_30`）
+- `order_lines_30d` — 上述 30 个有库存日期中的总订单行数
+- `avg_daily_orders` — `order_lines_30d / 30`
 
 ### FC 库存天数（D2S）
 ```
