@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-pymysql
-boto3
-python-dotenv
-plotly
-hypothesis
-pytest

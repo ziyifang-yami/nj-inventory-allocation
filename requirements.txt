@@ -1,7 +1,9 @@
-pandas
-sqlalchemy
-pymysql
-python-dotenv
 streamlit
-fastapi
-uvicorn
+pandas
+numpy
+pymysql
+boto3
+python-dotenv
+plotly
+hypothesis
+pytest

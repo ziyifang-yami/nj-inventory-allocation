@@ -1,89 +1,94 @@
-# NJ Inventory Allocation
+# NJ Inventory Allocation — v4 DC Allocation
 
-NJ 仓库库存分配系统 — 根据销售分层和 D2S 决策 FC/SFC 之间的调拨方向。
+Live dashboard for dual-warehouse inventory management (FC ↔ SFC) at NJ Distribution Center.
 
----
+**Servers:**
+| Port | App | Description |
+|------|-----|-------------|
+| 8508 | `app.py` | Main dashboard |
+| 8512 | `app_test_sfc.py` | SFC→FC test view |
+| 8513 | `app_test_fc2sfc.py` | FC→SFC test view |
 
-## 项目结构
-
-```
-NJ_Inventory_Allocation/
-│
-├── shared/                      ← 核心共享模块（所有版本调用）
-│   ├── inventory.py             ← 库存基数：按 zone_id 区分 FC vs SFC
-│   ├── athena.py                ← Athena 连接 + active_days 查询
-│   ├── allocator_base.py        ← D2S + Active Days 决策引擎
-│   └── __init__.py
-│
-├── v1_segment/                  ← 归档：nj_segment 文字分层（含大量 TBD）
-├── v2_sales_tier/               ← 当前主版本：WMS group_tier 数字分层
-│   ├── run_allocation.py        ← 入口，调用 shared 模块
-│   ├── allocator.py             ← V2 专用 MODES 定义（group_tier 9-16）
-│   ├── LOGIC.md                 ← V2 逻辑文档
-│   └── allocation_result.csv   ← 上次运行结果
-│
-├── v3_segment/                  ← 开发中：新 segment 方案
-│   └── run_allocation.py        ← 骨架，填入 MODES + load_segment() 即可运行
-│
-├── explore/                     ← 数据探索脚本（归档，不参与主流程）
-│
-├── .env                         ← 凭证（不进 git）
-├── .env.example                 ← 凭证模板
-└── requirements.txt
-```
-
----
-
-## 核心逻辑（shared 模块）
-
-### 库存基数 (`shared/inventory.py`)
-
-按 zone_id 区分 FC 和 SFC：
-
-| Zone | 含义 | location_type |
-|------|------|--------------|
-| zone_id = 1 | FC 传统 Bin Pick 区 | 3 (STOCK), 4 (BIN Pick) |
-| zone_id = 2 | FC S 区（2026-09 迁入）| 4 (BIN Pick) |
-| zone_id = 0 | SFC 存储区 | 3 (STOCK) |
-
-### 分配决策 (`shared/allocator_base.py`)
+## Architecture
 
 ```
-对每个 SKU：
-  1. segment_key → MODES 字典 → (mode, D2S上限, D2S下限, 补回触发)
-  2. active_days < 5         → TRANSFER_TO_SFC（全迁）
-  3. fc_d2s > D2S上限        → TRANSFER_TO_SFC（迁至上限）
-  4. fc_d2s < 补回触发        → RETURN_FROM_SFC（补至上限）
-  5. 其余                    → KEEP
+app.py / app_test_*.py   ← Streamlit UI (8508 / 8512 / 8513)
+refresh_sfc_cache.py     ← Cron job — rebuilds sfc_cache.db every 30 min
+cache_db.py              ← SQLite cache layer (results/sfc_cache.db)
+config.py                ← All tunable thresholds (P dict)
+logic/
+  fc_to_sfc.py           ← FC→SFC: MIDDLE evict + TAIL clear + LOC_CLEAR
+  sfc_to_fc.py           ← SFC→FC: T1/T2/T3/T4 task lists
+  putaway.py             ← Putaway decision engine (TBD/TOP/MIDDLE/TAIL)
+data/
+  loader.py              ← MySQL queries (inventory, lots, sales, FC exp)
+docs/
+  design.md              ← System design
+  ui-layout-guide.md     ← UI layout reference
+tests/                   ← Unit + property tests
+scripts/                 ← One-off debug/deploy scripts (not production)
 ```
 
----
+## Key Logic
 
-## 快速开始
+### Segment Classification
+| Segment | Criteria |
+|---------|----------|
+| TBD | `inv_days_30 < 30` or NaN (new product) |
+| TOP | `active_order_days ≥ 21` AND `order_lines_30d ≥ 30` |
+| TAIL | `order_lines_30d < 8` |
+| MIDDLE | All others |
+
+### FC→SFC Triggers
+- **MIDDLE EVICT**: `fc_d2s > 30d` → transfer newest lots to SFC, keep oldest in FC (FIFO)
+- **TAIL CLEAR**: any FC stock → full clear to SFC
+- **LOC CLEAR**: locations where all live SKUs are in the transfer set
+
+### SFC→FC Task Lists
+- **T1**: Emergency (FC D2S < 3d) — all segments
+- **T2**: Routine replenishment (FC D2S < 14d) — MIDDLE; all SFC for TOP
+- **T3**: Bin→Stock reorganization
+- **T4**: Expiry date switch (FEFO)
+
+### Putaway Decision (8504 — Putaway Guide)
+See `logic/putaway.py` for the full decision tree.
+
+## Configuration
+
+Key thresholds in `config.py`:
+
+```python
+P = {
+    "putaway_d2s":         30,   # MIDDLE: FC D2S > this → new goods to SFC
+    "mid_evict_d2s":       30,   # FC→SFC trigger
+    "mid_keep_d2s":        30,   # FC target keep
+    "mid_evict_buffer_d2s": 3,   # FC can drop to keep-buffer after transfer
+    "mid_target_d2s":      28,   # SFC→FC replenishment target
+    "mid_emergency_d2s":    3,   # T1 emergency trigger
+    "mid_replen_d2s":      14,   # T2 routine trigger
+    "top_trigger_d2s":     28,   # TOP SFC→FC trigger
+}
+```
+
+## Setup
 
 ```bash
-# 安装依赖
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env   # fill in DB credentials
 
-# 运行 V2（WMS group_tier 分层）
-cd v2_sales_tier
-python run_allocation.py
+# Run dashboard
+streamlit run app.py --server.port 8508
 
-# 运行 V3（新 segment 分层，开发中）
-cd v3_segment
-python run_allocation.py
+# Run cache refresh (also runs as cron every 30 min)
+python refresh_sfc_cache.py
 ```
 
----
+## Branch History
 
-## 新增方案说明
-
-要新增一个分层方案（如 V4），只需：
-
-1. 复制 `v3_segment/` 文件夹改名
-2. 在 `run_allocation.py` 里：
-   - 实现 `load_segment()` — 从数据库拉你的 segment 数据
-   - 填写 `MODES` 字典 — `{segment_int: (mode, upper, lower, return_trigger)}`
-3. `shared/` 里的所有代码完全不用动
-
-库存基数永远调用 `load_fc_sfc_inventory()`，逻辑不变。
+| Branch | Description |
+|--------|-------------|
+| `master` | Current production version (v4) |
+| `archive/legacy-v1-v3` | Archived: v1 (BU segment), v2 (sales tier), v3 (FC segment), Zone 2 SFC orders |
+| `feature/v4-dc-allocation` | Development branch (merged into master) |
