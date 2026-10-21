@@ -85,6 +85,22 @@ except BlockingIOError:
     _lock_fh.close()
     exit(0)
 
+import atexit as _atexit
+
+def _release_lock():
+    """Always clean up lock file on exit (normal, exception, or signal)."""
+    try:
+        _fcntl.flock(_lock_fh, _fcntl.LOCK_UN)
+        _lock_fh.close()
+    except Exception:
+        pass
+    try:
+        _LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+_atexit.register(_release_lock)
+
 print(f"\n[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Starting SFC cache refresh...")
 
 from cache_db import CacheDB

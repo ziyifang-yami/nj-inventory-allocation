@@ -43,7 +43,22 @@ _ts_mid  = _get_ts("fc2sfc_tasks")
 _sq3_conn.close()
 if _ts_mid:
     _age_min = (datetime.now(ZoneInfo("America/New_York")) - _ts_mid).total_seconds() / 60
-    st.caption(f"🕐 FC inventory transit log last sync: {_ts_mid.strftime('%Y-%m-%d %H:%M ET')}  ({_age_min:.0f} min ago)")
+    # Also read triggers timestamp (refreshes every ~30min, faster than tasks)
+    _sq3_conn2 = _sq3.connect(DB_PATH)
+    _ts_trig = None
+    try:
+        _row_trig = _sq3_conn2.execute("SELECT updated_at FROM meta WHERE table_name='fc2sfc_triggers'").fetchone()
+        if _row_trig:
+            _ts_trig = datetime.fromisoformat(_row_trig[0]).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        pass
+    finally:
+        _sq3_conn2.close()
+    _trig_str = ""
+    if _ts_trig:
+        _trig_age = (datetime.now(ZoneInfo("America/New_York")) - _ts_trig).total_seconds() / 60
+        _trig_str = f" · SKU triggers: {_ts_trig.strftime('%H:%M ET')} ({_trig_age:.0f} min ago)"
+    st.caption(f"🕐 FC inventory transit log last sync: {_ts_mid.strftime('%Y-%m-%d %H:%M ET')} ({_age_min:.0f} min ago){_trig_str}")
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -59,6 +74,19 @@ with st.sidebar:
     st.caption(_age_badge("fc2sfc_triggers", 0.5))
     st.caption("**Tasks** (lot-level, ~1h refresh)")
     st.caption(_age_badge("fc2sfc_tasks", 1.1))
+
+    # ── Watchdog status ───────────────────────────────────────
+    st.divider()
+    st.caption("**Watchdog** (auto-restart if stale)")
+    _wd_log = Path(_HERE) / "results" / "watchdog.log"
+    if _wd_log.exists():
+        _wd_lines = _wd_log.read_text().strip().splitlines()
+        _last_wd  = _wd_lines[-1] if _wd_lines else "—"
+        # Show just the time + status part
+        _wd_short = _last_wd.split("] watchdog: ")[-1] if "] watchdog: " in _last_wd else _last_wd
+        st.caption(f"✅ {_wd_short[:60]}")
+    else:
+        st.caption("⚠️ watchdog.log not found")
 
     if st.button("🔄 Refresh All Data", key="btn_all", use_container_width=True, type="primary"):
         with st.spinner("Running full refresh (~7 min)..."):

@@ -137,6 +137,18 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Failed: {e}")
 
+    # ── Watchdog status ───────────────────────────────────────
+    st.divider()
+    st.caption("**Watchdog** (auto-restart if stale)")
+    _wd_log = Path(os.path.dirname(os.path.abspath(__file__))) / "results" / "watchdog.log"
+    if _wd_log.exists():
+        _wd_lines = _wd_log.read_text().strip().splitlines()
+        _last_wd  = _wd_lines[-1] if _wd_lines else "—"
+        _wd_short = _last_wd.split("] watchdog: ")[-1] if "] watchdog: " in _last_wd else _last_wd
+        st.caption(f"✅ {_wd_short[:60]}")
+    else:
+        st.caption("⚠️ watchdog.log not found")
+
     st.divider()
     if st.button("🔄 Refresh All Data", key="btn_all", use_container_width=True, type="primary"):
         with st.spinner("Running full refresh (~90s)..."):

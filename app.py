@@ -407,12 +407,13 @@ st.markdown(
 )
 
 # ── Top-level page tabs ───────────────────────────────────────
-tab_dash, tab_compare, tab_fc2sfc, tab_sfc2fc, tab_putaway = st.tabs([
+tab_dash, tab_compare, tab_fc2sfc, tab_sfc2fc, tab_putaway, tab_sku = st.tabs([
     "📊 Overview",
     "⚖️ Before vs After",
     "📤 FC→SFC Plan",
     "📥 SFC→FC Plan",
     "📦 Putaway",
+    "🔍 SKU Lookup",
 ])
 
 
@@ -1621,3 +1622,138 @@ with tab_putaway:
             mime="text/csv",
             key="dl_putaway",
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — SKU Lookup
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_sku:
+    st.markdown("### 🔍 SKU Inventory Lookup")
+    st.markdown("""
+<div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+  <span style="background:#e8f5e9;color:#2e7d32;border-radius:6px;padding:3px 10px;font-size:.82rem;font-weight:600">🟢 Location & Qty — live MySQL</span>
+  <span style="background:#e3f2fd;color:#1565c0;border-radius:6px;padding:3px 10px;font-size:.82rem;font-weight:600">🔵 Segment, FC D2S, Transfer List — 30-min cache</span>
+</div>
+""", unsafe_allow_html=True)
+
+    _sku_q = st.text_input("🔍 Item Number", value="1155015341", key="sku_lookup_input",
+                           placeholder="Enter item number…")
+
+    if _sku_q and _sku_q.strip():
+        _q = _sku_q.strip()
+        _sku_row = df[df["item_number"].astype(str) == _q]
+
+        if _sku_row.empty:
+            st.info(f"No SKU found matching '{_q}' in current inventory.")
+        else:
+            # Show what we found in df
+            st.caption(f"Found in inventory: {list(_sku_row['item_number'].astype(str).unique())} | Segments: {list(_sku_row['seg'].unique())}")
+            with st.spinner("Loading live location data…"):
+                _matched_skus = tuple(sorted(_sku_row["item_number"].astype(str).tolist()))
+                _fc_lots_live, _fc_err = load_fc_lot_data(list(_matched_skus))
+                _sfc_lots_live, _sfc_err = load_sfc_lot_data(_matched_skus)
+                if _fc_err:
+                    st.warning(f"FC lot query error: {_fc_err}")
+                    _fc_lots_live = pd.DataFrame()
+                if _sfc_err:
+                    st.warning(f"SFC lot query error: {_sfc_err}")
+                    _sfc_lots_live = pd.DataFrame()
+                # Filter to only the matched SKUs (avoid leaking other SKUs from same locations)
+                if _fc_lots_live is not None and not _fc_lots_live.empty:
+                    _fc_lots_live = _fc_lots_live[_fc_lots_live["item_number"].astype(str).isin(_matched_skus)]
+                if _sfc_lots_live is not None and not _sfc_lots_live.empty:
+                    _sfc_lots_live = _sfc_lots_live[_sfc_lots_live["item_number"].astype(str).isin(_matched_skus)]
+
+            # Transfer list lookup — per LOCATION (not per SKU)
+            _db_sk = _CacheDB_main("results/sfc_cache.db")
+            _loc_list_map: dict = {}  # location_no → list name
+            _list_labels = {
+                "LOC_CLEAR": "FC→SFC LOC Clear",
+                "MIDDLE_EVICT": "FC→SFC Middle Evict",
+                "TAIL_CLEAR": "FC→SFC Tail Clear",
+                "T1": "SFC→FC T1", "T2": "SFC→FC T2",
+                "T3": "SFC→FC T3", "T4": "SFC→FC T4",
+            }
+            # LOC_CLEAR has priority — if a location is in LOC_CLEAR, don't also count it in TAIL/MIDDLE
+            for _lid in ["LOC_CLEAR", "MIDDLE_EVICT", "TAIL_CLEAR"]:
+                _tl = _db_sk.read_fc2sfc_task(_lid)
+                if not _tl.empty and "item_number" in _tl.columns and "location_no" in _tl.columns:
+                    _in = _tl[_tl["item_number"].astype(str).isin(_matched_skus)]
+                    for _, _r in _in.iterrows():
+                        _loc = str(_r.get("location_no", ""))
+                        if _loc not in _loc_list_map:  # first write wins (LOC_CLEAR is first)
+                            _loc_list_map[_loc] = _list_labels[_lid]
+            for _lid in ["T1", "T2", "T3", "T4"]:
+                _tl = _db_sk.read_task_list(_lid)
+                if not _tl.empty and "item_number" in _tl.columns and "location_no" in _tl.columns:
+                    _in = _tl[_tl["item_number"].astype(str).isin(_matched_skus)]
+                    for _, _r in _in.iterrows():
+                        _loc = str(_r.get("location_no", ""))
+                        if _loc not in _loc_list_map:
+                            _loc_list_map[_loc] = _list_labels[_lid]
+
+            _rows_sk = []
+            for _df_lots, _zone in [(_fc_lots_live, "FC"), (_sfc_lots_live, "SFC")]:
+                if _df_lots is None or _df_lots.empty:
+                    continue
+                _m = _df_lots.merge(
+                    _sku_row[["item_number", "seg", "fc_d2s", "avg_daily_orders"]].drop_duplicates("item_number"),
+                    on="item_number", how="left"
+                )
+                # Debug: check for missing segments after merge
+                _missing_seg = _m[_m["seg"].isna()]["item_number"].unique()
+                if len(_missing_seg) > 0:
+                    st.warning(f"⚠️ {_zone}: {len(_missing_seg)} item(s) have no segment after merge: {list(_missing_seg[:5])} | lot item_numbers sample: {list(_m['item_number'].astype(str).unique()[:5])} | sku_row item_numbers: {list(_sku_row['item_number'].astype(str).unique()[:5])}")
+                _m["seg"] = _m["seg"].fillna("TBD")
+                _m["fc_d2s"] = pd.to_numeric(_m["fc_d2s"], errors="coerce")
+                _m["avg_daily_orders"] = pd.to_numeric(_m["avg_daily_orders"], errors="coerce").fillna(0)
+                _m["zone"] = _zone
+                _m["warehouse"] = "NJ-002"
+                _m["transfer_list"] = _m["location_no"].astype(str).map(
+                    lambda loc: _loc_list_map.get(loc, "—")
+                )
+                _rows_sk.append(_m)
+
+            if _rows_sk:
+                _result_sk = pd.concat(_rows_sk, ignore_index=True)
+                _disp_cols_sk = {
+                    "item_number": "SKU",
+                    "seg": "Segment",
+                    "location_no": "Location",
+                    "loc_type": "Loc Type",
+                    "qty": "Qty",
+                    "exp_date": "Exp Date",
+                    "fc_d2s": "FC D2S",
+                    "avg_daily_orders": "Avg Daily Sales",
+                    "transfer_list": "Transfer List",
+                    "zone": "Current Zone",
+                    "warehouse": "Warehouse",
+                }
+                _show_sk = [c for c in _disp_cols_sk if c in _result_sk.columns]
+                _res_sk = _result_sk[_show_sk].rename(columns=_disp_cols_sk).reset_index(drop=True)
+                _res_sk.index = _res_sk.index + 1
+                st.dataframe(
+                    _res_sk, use_container_width=True,
+                    column_config={
+                        "SKU":              st.column_config.TextColumn(width=120),
+                        "Segment":          st.column_config.TextColumn(width=80),
+                        "Location":         st.column_config.TextColumn(width=100),
+                        "Loc Type":         st.column_config.TextColumn(width=80),
+                        "Qty":              st.column_config.NumberColumn(width=70),
+                        "Exp Date":         st.column_config.DateColumn(width=100, format="YYYY-MM-DD"),
+                        "FC D2S":           st.column_config.NumberColumn(width=75, format="%.1f"),
+                        "Avg Daily Sales":  st.column_config.NumberColumn(width=115, format="%.2f"),
+                        "Transfer List":    st.column_config.TextColumn(width=150),
+                        "Current Zone":     st.column_config.TextColumn(width=90),
+                        "Warehouse":        st.column_config.TextColumn(width=90),
+                    }
+                )
+                st.caption(f"**{len(_res_sk):,} location rows · {_res_sk['SKU'].nunique()} SKU(s)**  |  🟢 Location & Qty: live  |  🔵 Segment / Transfer List: cache (~30min)")
+            else:
+                st.dataframe(
+                    _sku_row[["item_number","seg","fc_qty","sfc_qty","fc_d2s","avg_daily_orders"]].rename(columns={
+                        "item_number":"SKU","fc_qty":"FC Qty","sfc_qty":"SFC Qty",
+                        "fc_d2s":"FC D2S","avg_daily_orders":"Avg Daily Orders"
+                    }), use_container_width=True
+                )
+                st.caption("No lot-level location data found. Showing SKU-level summary.")
