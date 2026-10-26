@@ -633,6 +633,11 @@ else:
         log.append(f"fc2sfc_tasks: FAILED ({e})")
 
 # ── Step 9: Pending putaway (30-min TTL — same as main cron cycle) ───────────
+# Hard timeout: if putaway query takes > 120s, skip and move on.
+# This prevents slow wh_inventory_transaction_log scans from delaying
+# fc2sfc_tasks updates (which would then appear stale to users).
+_PUTAWAY_TIMEOUT_S = 120
+
 if db.age_minutes("pending_putaway") < 30:
     print("  [9] Pending putaway — cache fresh, skipping.")
     log.append("pending_putaway: cache hit (skipped)")
@@ -640,8 +645,19 @@ else:
     t0 = time.perf_counter()
     print("  [9] Loading pending putaway from RECG locations...")
     try:
-        from data.loader import load_pending_putaway as _load_pa
-        _df_pa, _pa_err = _load_pa()
+        import signal as _signal
+
+        def _putaway_timeout_handler(signum, frame):
+            raise TimeoutError("pending_putaway query exceeded timeout")
+
+        _signal.signal(_signal.SIGALRM, _putaway_timeout_handler)
+        _signal.alarm(_PUTAWAY_TIMEOUT_S)
+        try:
+            from data.loader import load_pending_putaway as _load_pa
+            _df_pa, _pa_err = _load_pa()
+        finally:
+            _signal.alarm(0)  # cancel alarm
+
         if _pa_err:
             print(f"      Pending putaway query failed: {_pa_err}")
             log.append(f"pending_putaway: FAILED ({_pa_err})")
@@ -650,6 +666,10 @@ else:
             elapsed = time.perf_counter() - t0
             print(f"      {len(_df_pa):,} SKUs pending putaway  ({elapsed:.1f}s)")
             log.append(f"pending_putaway: {len(_df_pa):,} SKUs in {elapsed:.1f}s")
+    except TimeoutError as e:
+        elapsed = time.perf_counter() - t0
+        print(f"      Pending putaway TIMED OUT after {elapsed:.0f}s — skipping (stale data retained)")
+        log.append(f"pending_putaway: TIMEOUT ({elapsed:.0f}s)")
     except Exception as e:
         print(f"      ERROR in Step 9: {e}")
         log.append(f"pending_putaway: FAILED ({e})")

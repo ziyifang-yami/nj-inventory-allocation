@@ -28,7 +28,7 @@ REFRESH_SCRIPT  = HERE / "refresh_sfc_cache.py"
 VENV_PYTHON     = HERE / ".venv" / "bin" / "python"
 LOG_FILE        = HERE / "results" / "watchdog.log"
 
-TASKS_STALE_MIN = 75   # trigger restart if fc2sfc_tasks > 75 min old (1h TTL + 15min buffer)
+TASKS_STALE_MIN = 65   # trigger restart if fc2sfc_tasks > 65 min old (1h TTL + 5min buffer)
 MAX_RUN_MIN     = 20   # kill and restart if refresh has been running > 20 min (normal run ~4min)
 
 NJ_TZ = ZoneInfo("America/New_York")

@@ -71,6 +71,8 @@ def _connect():
         port=port,
         charset="utf8mb4",
         connect_timeout=8,
+        read_timeout=90,    # kill slow queries after 90s (prevents pending_putaway from blocking)
+        write_timeout=30,
     )
     return conn
 
