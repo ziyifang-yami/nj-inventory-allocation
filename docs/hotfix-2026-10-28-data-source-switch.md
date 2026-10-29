@@ -145,7 +145,7 @@ GROUP BY i.item_number
 
 ---
 
-### `refresh_sfc_cache.py`
+### `refresh_dashboard_cache.py`
 
 Windows 兼容修复（本地开发用，服务器无影响）：
 - `fcntl` — 改为条件导入，Windows 用 no-op 替代
@@ -179,7 +179,7 @@ systemctl restart inv-allocation
 cd /opt/inv-allocation
 sqlite3 results/sfc_cache.db "DELETE FROM sales; DELETE FROM meta WHERE table_name='sales';"
 rm -f results/athena_cache.csv results/athena_cache_ts.txt
-nohup .venv/bin/python3 refresh_sfc_cache.py > results/refresh.log 2>&1 &
+nohup .venv/bin/python3 refresh_dashboard_cache.py > results/refresh.log 2>&1 &
 
 # 4. 如需同时重建 FC→SFC 任务列表（segment 改变后旧任务需清空）
 sqlite3 results/sfc_cache.db "DELETE FROM fc2sfc_tasks; DELETE FROM fc2sfc_triggers; DELETE FROM meta WHERE table_name IN ('fc2sfc_tasks','fc2sfc_triggers');"

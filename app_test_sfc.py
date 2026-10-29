@@ -129,7 +129,7 @@ with st.sidebar:
             try:
                 import subprocess, sys
                 subprocess.run(
-                    [sys.executable, "refresh_sfc_cache.py"],
+                    [sys.executable, "refresh_dashboard_cache.py"],
                     cwd=os.path.dirname(os.path.abspath(__file__)),
                     timeout=180,
                 )
@@ -155,7 +155,7 @@ with st.sidebar:
             try:
                 import subprocess, sys
                 subprocess.run(
-                    [sys.executable, "refresh_sfc_cache.py"],
+                    [sys.executable, "refresh_dashboard_cache.py"],
                     cwd=os.path.dirname(os.path.abspath(__file__)),
                     timeout=180,
                 )
@@ -193,7 +193,7 @@ if _overdue_tables:
                 _lock_stale = True
         if not _lock.exists():
             _sp.Popen(
-                [_sys.executable, "refresh_sfc_cache.py"],
+                [_sys.executable, "refresh_dashboard_cache.py"],
                 cwd=os.path.dirname(os.path.abspath(__file__)),
                 stdout=_sp.DEVNULL,
                 stderr=_sp.DEVNULL,
@@ -206,7 +206,7 @@ with _timed("Sales"):
     if df_sales.empty:
         st.error(
             "Sales cache not found in SQLite. Run the refresh script first:\n\n"
-            "`python refresh_sfc_cache.py`"
+            "`python refresh_dashboard_cache.py`"
         )
         st.stop()
     _sales_age_h = DB_CACHE.age_minutes("sales") / 60

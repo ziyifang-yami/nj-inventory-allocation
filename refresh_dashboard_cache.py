@@ -1,8 +1,8 @@
 """
-refresh_sfc_cache.py — Pre-warm all SFC→FC caches into a single SQLite DB.
+refresh_dashboard_cache.py — Pre-warm all dashboard caches into a single SQLite DB.
 
-Run manually:   python refresh_sfc_cache.py
-Run via cron:   */30 * * * * cd /opt/inv-allocation && .venv/bin/python refresh_sfc_cache.py >> results/refresh.log 2>&1
+Run manually:   python refresh_dashboard_cache.py
+Run via cron:   */30 * * * * cd /opt/inv-allocation && .venv/bin/python refresh_dashboard_cache.py >> results/refresh.log 2>&1
 
 Writes ONLY to:
   results/sfc_cache.db    (tables: sales, sfc_lots, fc_exp, exp_flags, task_list, meta)
@@ -78,7 +78,7 @@ if _LOCK_FILE.exists():
         # Check if PID is still alive
         os.kill(_old_pid, 0)
         # Process exists — let flock decide below
-    except (ValueError, ProcessLookupError, PermissionError):
+    except (ValueError, ProcessLookupError, PermissionError, OSError):
         # PID dead or unreadable — stale lock, remove it
         _LOCK_FILE.unlink(missing_ok=True)
         print(f"[{_now_nj().strftime('%Y-%m-%d %H:%M ET')}] Removed stale lock (dead PID).")

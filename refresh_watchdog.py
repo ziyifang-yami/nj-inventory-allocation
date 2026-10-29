@@ -1,5 +1,5 @@
 """
-watchdog.py — Monitor refresh_sfc_cache.py health and restart if stale.
+watchdog.py — Monitor refresh_dashboard_cache.py health and restart if stale.
 
 Run via cron every 10 minutes:
   */10 * * * * cd /opt/inv-allocation && .venv/bin/python watchdog.py >> results/watchdog.log 2>&1
@@ -8,7 +8,7 @@ Checks:
   1. fc2sfc_tasks age > TASKS_STALE_MIN  → stale, needs refresh
   2. refresh.lock exists with live PID   → already running, skip
   3. refresh.lock exists with dead PID   → stale lock, remove and restart
-  4. No lock + stale tasks               → spawn refresh_sfc_cache.py
+  4. No lock + stale tasks               → spawn refresh_dashboard_cache.py
 
 Also checks if the running refresh process is hung (> MAX_RUN_MIN).
 """
@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 HERE            = Path(__file__).parent.resolve()
 DB_PATH         = HERE / "results" / "sfc_cache.db"
 LOCK_FILE       = HERE / "results" / "refresh.lock"
-REFRESH_SCRIPT  = HERE / "refresh_sfc_cache.py"
+REFRESH_SCRIPT  = HERE / "refresh_dashboard_cache.py"
 VENV_PYTHON     = HERE / ".venv" / "bin" / "python"
 LOG_FILE        = HERE / "results" / "watchdog.log"
 
@@ -84,7 +84,7 @@ def pid_run_minutes(pid: int) -> float:
         return -1.0
 
 def spawn_refresh():
-    """Start refresh_sfc_cache.py as a detached background process."""
+    """Start refresh_dashboard_cache.py as a detached background process."""
     python = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
     proc = subprocess.Popen(
         [python, str(REFRESH_SCRIPT)],

@@ -92,7 +92,7 @@ with st.sidebar:
         with st.spinner("Running full refresh (~7 min)..."):
             try:
                 import subprocess, sys as _sys
-                subprocess.run([_sys.executable, "refresh_sfc_cache.py"],
+                subprocess.run([_sys.executable, "refresh_dashboard_cache.py"],
                                cwd=_HERE, timeout=600)
                 st.rerun()
             except Exception as e:
@@ -111,7 +111,7 @@ if _tasks_age > 65:  # 1h + 5min buffer
             except (ValueError, ProcessLookupError, PermissionError):
                 _lock.unlink(missing_ok=True)
         if not _lock.exists():
-            _sp.Popen([_sys.executable, "refresh_sfc_cache.py"],
+            _sp.Popen([_sys.executable, "refresh_dashboard_cache.py"],
                       cwd=_HERE, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
             st.info("⏳ FC→SFC tasks overdue (>1h). Background refresh triggered.")
     except Exception:
@@ -128,7 +128,7 @@ class _timed:
 with _timed("Sales"):
     df_sales = DB_CACHE.read_sales()
     if df_sales.empty:
-        st.error("Sales cache not found. Run `python refresh_sfc_cache.py` first.")
+        st.error("Sales cache not found. Run `python refresh_dashboard_cache.py` first.")
         st.stop()
 
 # ── Step 2: Inventory ─────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ NJ_Inventory_Allocation/
 ├── app_test_sfc.py           # SFC→FC 测试服务（8512）
 ├── cache_db.py               # SQLite 缓存封装
 ├── config.py                 # 阈值配置（aod_top/ol_top/ol_tail 等）
-├── refresh_sfc_cache.py      # 定时缓存刷新（cron 调用）
+├── refresh_dashboard_cache.py      # 定时缓存刷新（cron 调用）
 ├── refresh_watchdog.py       # 刷新看门狗
 ├── requirements.txt
 ├── .env / .env.example
@@ -97,7 +97,7 @@ cp .env.example .env
 streamlit run app.py --server.port 8508
 
 # 4. 构建/刷新缓存（服务器上每 30 分钟由 cron 自动运行）
-python refresh_sfc_cache.py
+python refresh_dashboard_cache.py
 ```
 
 ---
@@ -112,7 +112,7 @@ nj-inventory-allocation/
 ├── app_test_fc2sfc.py       FC→SFC 测试视图（端口 8513）
 ├── cache_db.py              SQLite 缓存层 — 所有对 sfc_cache.db 的读写
 ├── config.py                所有可调参数（P 字典）
-├── refresh_sfc_cache.py     定时任务 — 每 30 分钟重建 sfc_cache.db
+├── refresh_dashboard_cache.py     定时任务 — 每 30 分钟重建 sfc_cache.db
 ├── requirements.txt         Python 依赖
 │
 ├── logic/                   核心业务逻辑
@@ -147,7 +147,7 @@ nj-inventory-allocation/
 │   └── *.sh                 Shell 工具脚本
 │
 └── results/                 运行时输出（.gitignore 已忽略，保留 .gitkeep）
-    ├── sfc_cache.db         SQLite 缓存 — 由 refresh_sfc_cache.py 重建
+    ├── sfc_cache.db         SQLite 缓存 — 由 refresh_dashboard_cache.py 重建
     └── athena_cache.csv     Athena 销量数据缓存（12 小时 TTL）
 ```
 
@@ -189,7 +189,7 @@ fc_d2s = fc_qty / avg_daily_orders
 
 ### 缓存刷新流程
 
-`refresh_sfc_cache.py` 每 30 分钟运行一次：
+`refresh_dashboard_cache.py` 每 30 分钟运行一次：
 
 ```
 [1] 库存数据（MySQL，实时）

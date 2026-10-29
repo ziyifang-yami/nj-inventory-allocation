@@ -22,7 +22,7 @@ c.close()
 "
 
 echo "Starting refresh (background, logging to results/refresh.log)..."
-nohup .venv/bin/python refresh_sfc_cache.py >> results/refresh.log 2>&1 &
+nohup .venv/bin/python refresh_dashboard_cache.py >> results/refresh.log 2>&1 &
 REFRESH_PID=$!
 echo "  PID: $REFRESH_PID"
 echo "  Tailing log for 15s..."
