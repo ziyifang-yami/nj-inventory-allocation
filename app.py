@@ -35,6 +35,7 @@ from data.loader import (
     load,
     load_fc_lot_data,
     load_sfc_lot_data,
+    load_sfc_lot_data_live,
     load_sku_loc_stats,
     load_fc_exp_summary,
     load_fc_exp_summary_all,
@@ -1651,7 +1652,7 @@ with tab_sku:
             with st.spinner("Loading live location data…"):
                 _matched_skus = tuple(sorted(_sku_row["item_number"].astype(str).tolist()))
                 _fc_lots_live, _fc_err = load_fc_lot_data(list(_matched_skus))
-                _sfc_lots_live, _sfc_err = load_sfc_lot_data(_matched_skus)
+                _sfc_lots_live, _sfc_err = load_sfc_lot_data_live(list(_matched_skus))
                 if _fc_err:
                     st.warning(f"FC lot query error: {_fc_err}")
                     _fc_lots_live = pd.DataFrame()

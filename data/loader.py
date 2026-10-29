@@ -576,6 +576,94 @@ def _sfc_lot_disk_cache():
     return None, False
 
 
+def load_sfc_lot_data_live(skus: list[str]):
+    """
+    Fetch SFC lot-level location data LIVE (no cache) for SKU Lookup tab.
+    Same SQL as load_fc_lot_data but with zone_id = 2 (SFC zone).
+    Always queries MySQL directly, never reads from parquet cache.
+    """
+    if not skus:
+        return pd.DataFrame(
+            columns=["item_number", "location_no", "loc_type", "qty",
+                     "exp_date", "inv_age_days", "case_qty", "need_minimal_exp"]
+        ), None
+
+    try:
+        conn = _connect()
+        SQL = """
+            SELECT
+                li.item_number,
+                li.location_no,
+                CASE WHEN wsl.location_type = 4 THEN 'Bin'
+                     WHEN wsl.location_type = 3 THEN 'Stock' END     AS loc_type,
+                wsl.size_id                                            AS size_id,
+                CONCAT(COALESCE(wls.description,''),
+                       '_',
+                       REPLACE(COALESCE(wls.storage_type,''), ' ', ''),
+                       '(',
+                       CAST(wsl.size_id AS CHAR),
+                       ')')                                            AS loc_size,
+                SUM(li.quantity)                                       AS qty,
+                MAX(CASE WHEN ib.qc_ExpiredDate > 0
+                         THEN DATE(FROM_UNIXTIME(ib.qc_ExpiredDate))
+                    END)                                               AS exp_date,
+                CAST(DATEDIFF(CURDATE(), DATE(FROM_UNIXTIME(
+                    MIN(CASE WHEN lm.lot_id = 1 OR lm.lot_id IS NULL
+                             THEN NULLIF(ib.in_dtm, 0)
+                             ELSE NULLIF(lm.receive_time, 0)
+                        END)
+                ))) AS SIGNED)                                         AS inv_age_days,
+                CASE WHEN wis.spec IS NULL OR wis.spec = '' THEN 1
+                     ELSE CAST(wis.spec AS UNSIGNED)
+                END                                                    AS case_qty,
+                MAX(IFNULL(iie.need_minimal_exp, 0))                   AS need_minimal_exp
+            FROM yamibuy_wh.wh_lot_inventory li
+            JOIN yamibuy_wh.wh_storage_location wsl
+                ON  wsl.location_no      = li.location_no
+                AND wsl.warehouse_number = li.warehouse_number
+            LEFT JOIN yamibuy_wh.wh_location_size wls
+                ON  wls.size_id = wsl.size_id
+            LEFT JOIN yamibuy_wh.wh_lot_master lm
+                ON  lm.lot_id = li.lot_id
+            LEFT JOIN yamibuy_wh.wh_inbound_batch ib
+                ON  ib.lot_id = li.lot_id
+            LEFT JOIN yamibuy_wh.wh_item_setting wis
+                ON  wis.item_number      = li.item_number
+                AND wis.warehouse_number = '002'
+            LEFT JOIN yamibuy_im.im_item_extend iie
+                ON  iie.item_number = li.item_number
+            WHERE li.warehouse_number = '002'
+              AND li.quantity > 0
+              AND wsl.location_type IN (3, 4)
+              AND wsl.zone_id = 2
+              AND li.item_number IN ({ph})
+            GROUP BY li.item_number, li.location_no, wsl.location_type, wsl.size_id,
+                     wls.storage_type, wls.description, wis.spec
+            HAVING SUM(li.quantity) > 0
+        """
+        all_rows: list = []
+        all_cols: list | None = None
+        chunks = [skus[i : i + 500] for i in range(0, len(skus), 500)]
+        with conn.cursor() as cur:
+            for chunk in chunks:
+                ph = ",".join(["%s"] * len(chunk))
+                cur.execute(SQL.format(ph=ph), chunk)
+                if all_cols is None:
+                    all_cols = [d[0] for d in cur.description]
+                all_rows.extend(cur.fetchall())
+        conn.close()
+        df = pd.DataFrame(all_rows, columns=all_cols)
+        df["item_number"]      = df["item_number"].astype(str)
+        df["qty"]              = pd.to_numeric(df["qty"], errors="coerce").fillna(0)
+        df["exp_date"]         = pd.to_datetime(df["exp_date"], errors="coerce")
+        df["inv_age_days"]     = pd.to_numeric(df["inv_age_days"], errors="coerce").fillna(0).astype(int)
+        df["need_minimal_exp"] = pd.to_numeric(df["need_minimal_exp"], errors="coerce").fillna(0).astype(int)
+        df["case_qty"]         = pd.to_numeric(df["case_qty"], errors="coerce").fillna(1).clip(lower=1).astype(int)
+        return df, None
+    except Exception as exc:
+        return None, str(exc)
+
+
 @st.cache_data(ttl=1800, show_spinner=False)  # 30-minute memory cache
 def load_sfc_lot_data(skus_tuple: tuple):
     """
@@ -590,15 +678,15 @@ def load_sfc_lot_data(skus_tuple: tuple):
                      "exp_date", "inv_age_days", "case_qty", "need_minimal_exp"]
         ), None
 
-    # Fast path: check disk cache via no-arg function (no tuple hashing overhead)
-    _cached_df, _hit = _sfc_lot_disk_cache()
-    if _hit and _cached_df is not None:
-        return _cached_df, None
+    # Fast path: DISABLED — always query MySQL directly for live location data
+    # _cached_df, _hit = _sfc_lot_disk_cache()
+    # if _hit and _cached_df is not None:
+    #     return _cached_df, None
 
-    # ── Disk cache check (30 min) ─────────────────────────────
+    # ── Disk cache check: DISABLED — always live ──────────────
     CACHE_FILE = Path("results/sfc_lot_cache.parquet")
     CACHE_TS   = Path("results/sfc_lot_cache_ts.txt")
-    _CACHE_MAX_AGE_MIN = 120  # 2 hours — gives buffer for cron refresh cycle
+    _CACHE_MAX_AGE_MIN = 0  # 0 = always expired, always query MySQL
 
     if CACHE_FILE.exists() and CACHE_TS.exists():
         try:
