@@ -51,6 +51,8 @@ Dashboard (8508) 对商品 `5021184261` (FBY) 显示 segment = TAIL，
 
 **`wh_inventory_transaction_by_day` 快照机制**：T+1，每天凌晨约 03:07~03:24 ET 写入前一天数据（`day_id = '2026-10-27'` 在 `2026-10-28 03:13 ET` 完成写入）。`min(edit_dtm)` 为 2022 年是历史遗留行（库位长期不变时不更新），不代表快照时间。
 
+**`allocated_qty` 字段不纳入过滤条件**：`allocated_qty` 是已被订单预占、等待拣货的数量，是 `quantity` 的子集（物理库存里的一部分）。我们用 `quantity > 0` 判断"这天有没有在库库存"，目的是统计 `inv_days_30`。如果改成 `quantity - allocated_qty > 0`，会把"全部被预占但仍在库"的天排除，反而低估在库天数。因此保持 `quantity > 0` 不变。
+
 #### 新 SQL（当前生效）
 
 ```sql
