@@ -129,23 +129,6 @@ GROUP BY i.item_number
 | order_lines 定义 | `SUM(orders)` | `COUNT(DISTINCT order_id)`（主单去重） |
 | Athena database | `yamibuy_inventory` | `yamibuy_wh` |
 
-### 文件：`data/loader.py` — boto3 session 初始化
-
-增加本地 SSO profile 的自动检测：
-
-```python
-# 新增：prod-ziyi.fang-* profile 匹配（本地 SSO dev）
-elif any("prod-ziyi.fang" in s for s in sections):
-    aws_profile = next(s.replace("profile ", "") for s in sections if "prod-ziyi.fang" in s)
-
-# 新增：清除 IAM key 环境变量，让 SSO profile token 生效
-if os.getenv("AWS_ACCESS_KEY_ID") and aws_profile not in ("default",):
-    os.environ.pop("AWS_ACCESS_KEY_ID", None)
-    os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-```
-
-> **服务器不受影响**：服务器使用 `.env` 里的 IAM key，`AWS_ACCESS_KEY_ID` 存在时只有 `athena-prod`/`prod`/`default` 这几个分支会被走到，不会触发 pop 逻辑（因为服务器没有 `prod-ziyi.fang-*` profile）。
-
 ---
 
 ## 验证结果
