@@ -303,11 +303,15 @@ def load():
             SELECT item_number, day_id AS inv_date,
                    ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY day_id DESC) AS rn
             FROM (
-                SELECT DISTINCT item_number, day_id
-                FROM yamibuy_wh.wh_inventory_transaction_by_day
-                WHERE warehouse_number = '002'
-                  AND quantity > 0
-                  AND (item_number LIKE '1%' OR item_number LIKE '5%')
+                SELECT DISTINCT t.item_number, t.day_id
+                FROM yamibuy_wh.wh_inventory_transaction_by_day t
+                JOIN yamibuy_wh.wh_storage_location wsl
+                    ON  wsl.location_no      = t.location_no
+                    AND wsl.warehouse_number = t.warehouse_number
+                WHERE t.warehouse_number = '002'
+                  AND t.quantity > 0
+                  AND wsl.location_type IN (3, 4)
+                  AND (t.item_number LIKE '1%' OR t.item_number LIKE '5%')
             ) t
         ),
         inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
@@ -319,7 +323,7 @@ def load():
             JOIN yamibuy_wh.wh_order_goods og ON og.order_id = oi.order_id
             JOIN yamibuy_im.im_item ii ON og.goods_id = ii.goods_id
             WHERE oi.warehouse_number = '002'
-              AND oi.order_status NOT IN (0, 3)
+              AND oi.order_status IN (1, 5)
               AND (ii.item_number LIKE '1%' OR ii.item_number LIKE '5%')
         ),
         sales_agg AS (
