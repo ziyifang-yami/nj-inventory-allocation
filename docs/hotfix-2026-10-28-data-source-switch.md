@@ -130,7 +130,7 @@ SKU `5021184261` 新 SQL 结果：
 
 ```bash
 # 1. 上传 loader.py 到服务器
-scp data/loader.py root@184.33.17.231:/opt/inv-allocation/data/loader.py
+scp data/loader.py root@<SERVER>:/opt/inv-allocation/data/loader.py
 
 # 2. 重启服务
 systemctl restart inv-allocation
