@@ -208,7 +208,7 @@ else:
     print("  [4] WARNING: No sales data — using all SFC SKUs as candidates")
 
 for c in ["active_order_days","order_lines_30d","avg_daily_orders","sales_units_30d","unit_volume_cbm"]:
-    df[c] = pd.to_numeric(df.get(c, 0), errors="coerce").fillna(0)
+    df[c] = pd.to_numeric(df[c] if c in df.columns else pd.Series(0, index=df.index), errors="coerce").fillna(0)
 
 df["fc_d2s"] = np.where(df["avg_daily_orders"] > 0,
                         df["fc_qty"] / df["avg_daily_orders"], np.nan)
