@@ -5,68 +5,51 @@
 Dashboard (8508) 对商品 `5021184261` (FBY) 显示 segment = TAIL，
 但实际仓库出库数据显示该商品每日出库 5~13 单，属于 TOP 级别。
 
-经过调查发现根本原因是 **Athena `trade_item_sale_agg_daily` 表对 FBY 商品存在系统性数据缺失**：
-- FBY 商品（5开头）中 19.3% 的 SKU 在该表中完全无订单数据
-- 其余 FBY SKU 的 order lines 也严重偏低
-- 该商品 30 天内 Athena 只记录到 5 单，实际 MySQL WH 层有 ~192 单
+根本原因：
+1. **Athena `trade_item_sale_agg_daily` 对 FBY 商品存在系统性数据缺失** — 19.3% 的 FBY SKU 完全无数据，其余也严重偏低（该商品 Athena 只有 5 单，WH 层实际 191 单）
+2. **`yamibuy_inventory.inventory_record` 库存快照来自前台系统** — 未过滤可售库位，包含临时/过渡库位库存，且存在 bundle/combo 计数问题
 
 ---
 
-## 根本原因分析
+## 修改文件
 
-| 数据源 | 该商品 30天 order_lines | 说明 |
-|--------|------------------------|------|
-| `dwb_trade.trade_item_sale_agg_daily` (旧) | 5 | FBY ETL 缺失 |
-| `yamibuy_master.xysc_order_*` | 12 | 包含主+子单，需去重 |
-| `yamibuy_wh.wh_order_info` + `wh_order_goods` + `im_item` (新) | **191** | 正确，按 item_number join，解决 bundle/combo 问题 |
+### `data/loader.py` — `load()` 函数内的 `SQL_SALES`
 
-库存快照表同样存在问题：
-- 旧：`yamibuy_inventory.inventory_record`（前台表，bundle 有问题）
-- 新：`yamibuy_wh.wh_inventory_transaction_by_day`（WH 层，精确）
+#### 变更对比
 
----
+| 项目 | 旧 | 新 |
+|------|----|----|
+| **库存快照表** | `yamibuy_inventory.inventory_record` | `yamibuy_wh.wh_inventory_transaction_by_day` |
+| **库存可售过滤** | 无（包含所有库位） | JOIN `wh_storage_location`，只取 `location_type IN (3, 4)` |
+| **库存数量字段** | `available_qty > 0` + `virtual_qty = 0` | `quantity > 0` |
+| **库存日期字段** | `dt` | `day_id`（string，Athena 分区键） |
+| **inv_days 去重** | 无（多库位重复计天） | 加 `DISTINCT item_number, day_id` 子查询去重 |
+| **销售数据表** | `dwb_trade.trade_item_sale_agg_daily` | `yamibuy_wh.wh_order_info` + `wh_order_goods` + `yamibuy_im.im_item` |
+| **order_status 过滤** | `NOT IN (0, 3)`（错误） | `IN (1, 5)` — 已确认 + 已分单，排除退货(4) |
+| **订单 join 方式** | 直接按 item_number | 通过 `goods_id` join `im_item`，解决 bundle/combo 问题 |
+| **order_lines 定义** | `SUM(orders)` | `COUNT(DISTINCT order_id)` — 主单去重 |
+| **Athena database** | `yamibuy_inventory` | `yamibuy_wh` |
 
-## 修改内容
+#### 字段说明
 
-### 文件：`data/loader.py` — `load()` 函数内的 `SQL_SALES`
+**`wh_order_info.warehouse_number`**：履约仓（分仓优化后确定），不是购物车仓（购物车仓在 `cart_warehouse_number`）。`warehouse_number = '002'` 过滤的是 NJ 仓履约的订单。
 
-#### 旧 SQL（已废弃）
+**`wh_order_info.add_time`**：下单时间（ET Unix 秒）。下单即扣库存，与库存快照日期对齐，语义一致。
 
-```sql
-WITH inv_days AS (
-    SELECT item_number, dt AS inv_date,
-           ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY dt DESC) AS rn
-    FROM yamibuy_inventory.inventory_record
-    WHERE warehouse_number = '002'
-      AND virtual_qty = 0
-      AND available_qty > 0
-      AND (item_number LIKE '1%' OR item_number LIKE '5%')
-),
-inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
-sales AS (
-    SELECT item_number, day_id,
-           SUM(orders) AS daily_orders,
-           SUM(sales)  AS daily_sales
-    FROM dwb_trade.trade_item_sale_agg_daily
-    WHERE warehouse_number = '002'
-      AND orders > 0
-      AND (item_number LIKE '1%' OR item_number LIKE '5%')
-    GROUP BY item_number, day_id
-)
-SELECT
-    i.item_number,
-    COUNT(DISTINCT i.inv_date)                              AS inv_days_30,
-    COUNT(DISTINCT s.day_id)                               AS active_order_days,
-    COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE), 0)       AS order_lines_30d,
-    COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE) / 30.0, 0) AS avg_daily_orders,
-    COALESCE(SUM(s.daily_sales), 0)                        AS sales_units_30d
-FROM inv_30 i
-LEFT JOIN sales s
-    ON s.item_number = i.item_number AND s.day_id = i.inv_date
-GROUP BY i.item_number
-```
+**`wh_order_info.order_status` 枚举**：
 
-**Athena database**: `yamibuy_inventory`
+| 值 | 含义 | 是否计入销量 |
+|----|------|------------|
+| 1 | 已确认 | ✅ |
+| 5 | 已分单（已下发到履约仓，正常流转） | ✅ |
+| 4 | 退货 | ❌ |
+
+**`wh_storage_location.location_type`**（枚举定义在 `yamibuy_wh.wh_location_type`）：
+- `3` = Stock（标准库位，可售）
+- `4` = Bin（拣货库位，可售）
+- 其他类型不计入可售库存快照
+
+**`wh_inventory_transaction_by_day` 快照机制**：T+1，每天凌晨约 03:07~03:24 ET 写入前一天数据（`day_id = '2026-10-27'` 在 `2026-10-28 03:13 ET` 完成写入）。`min(edit_dtm)` 为 2022 年是历史遗留行（库位长期不变时不更新），不代表快照时间。
 
 #### 新 SQL（当前生效）
 
@@ -75,11 +58,15 @@ WITH inv_days AS (
     SELECT item_number, day_id AS inv_date,
            ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY day_id DESC) AS rn
     FROM (
-        SELECT DISTINCT item_number, day_id
-        FROM yamibuy_wh.wh_inventory_transaction_by_day
-        WHERE warehouse_number = '002'
-          AND quantity > 0
-          AND (item_number LIKE '1%' OR item_number LIKE '5%')
+        SELECT DISTINCT t.item_number, t.day_id
+        FROM yamibuy_wh.wh_inventory_transaction_by_day t
+        JOIN yamibuy_wh.wh_storage_location wsl
+            ON  wsl.location_no      = t.location_no
+            AND wsl.warehouse_number = t.warehouse_number
+        WHERE t.warehouse_number = '002'
+          AND t.quantity > 0
+          AND wsl.location_type IN (3, 4)
+          AND (t.item_number LIKE '1%' OR t.item_number LIKE '5%')
     ) t
 ),
 inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
@@ -91,7 +78,7 @@ sales AS (
     JOIN yamibuy_wh.wh_order_goods og ON og.order_id = oi.order_id
     JOIN yamibuy_im.im_item ii ON og.goods_id = ii.goods_id
     WHERE oi.warehouse_number = '002'
-      AND oi.order_status NOT IN (0, 3)
+      AND oi.order_status IN (1, 5)
       AND (ii.item_number LIKE '1%' OR ii.item_number LIKE '5%')
 ),
 sales_agg AS (
@@ -114,56 +101,54 @@ LEFT JOIN sales_agg s
 GROUP BY i.item_number
 ```
 
-**Athena database**: `yamibuy_wh`（改变了）
+**Athena database**: `yamibuy_wh`
 
-#### 关键变更点
+---
 
-| 项目 | 旧 | 新 |
-|------|----|----|
-| 库存快照表 | `yamibuy_inventory.inventory_record` | `yamibuy_wh.wh_inventory_transaction_by_day` |
-| 库存数量字段 | `available_qty > 0` + `virtual_qty = 0` | `quantity > 0` |
-| 库存日期字段 | `dt` | `day_id`（string，分区键） |
-| `inv_days` 去重 | 无（多库位重复计天） | 加 `DISTINCT item_number, day_id` 子查询去重 |
-| 销售数据表 | `dwb_trade.trade_item_sale_agg_daily` | `yamibuy_wh.wh_order_info` + `wh_order_goods` + `yamibuy_im.im_item` |
-| 订单 join 方式 | 直接按 item_number | 通过 `goods_id` join `im_item`，解决 bundle/combo 问题 |
-| order_lines 定义 | `SUM(orders)` | `COUNT(DISTINCT order_id)`（主单去重） |
-| Athena database | `yamibuy_inventory` | `yamibuy_wh` |
+### `refresh_sfc_cache.py`
+
+Windows 兼容修复（本地开发用，服务器无影响）：
+- `fcntl` — 改为条件导入，Windows 用 no-op 替代
+- `signal.SIGALRM` — 改为 `sys.platform == "win32"` 判断，Windows 跳过 timeout 逻辑
 
 ---
 
 ## 验证结果
 
-调试脚本：`scripts/_debug_today/_test_new_sql.py`
-
 SKU `5021184261` 新 SQL 结果：
 
-| 字段 | 值 |
-|------|-----|
-| inv_days_30 | 30 ✅ |
-| active_order_days | 30 |
-| order_lines_30d | 191 |
-| avg_daily_orders | 6.37 |
-| sales_units_30d | 478 |
-| **Segment** | **TOP** ✅（修复前为 TAIL） |
+| 字段 | 旧（Athena agg 表） | 新（WH 层） |
+|------|---------------------|-------------|
+| inv_days_30 | 30 | 30 |
+| active_order_days | 5 | 30 |
+| order_lines_30d | 5 | 191 |
+| **Segment** | **TAIL** ❌ | **TOP** ✅ |
+
+---
+
+## 部署步骤
+
+```bash
+# 1. 上传 loader.py 到服务器
+scp data/loader.py root@184.33.17.231:/opt/inv-allocation/data/loader.py
+
+# 2. 重启服务
+systemctl restart inv-allocation
+
+# 3. 强制 sales 缓存过期，触发全量 Athena 重跑（在服务器上执行）
+cd /opt/inv-allocation
+sqlite3 results/sfc_cache.db "DELETE FROM sales; DELETE FROM meta WHERE table_name='sales';"
+rm -f results/athena_cache.csv results/athena_cache_ts.txt
+nohup .venv/bin/python3 refresh_sfc_cache.py > results/refresh.log 2>&1 &
+
+# 4. 如需同时重建 FC→SFC 任务列表（segment 改变后旧任务需清空）
+sqlite3 results/sfc_cache.db "DELETE FROM fc2sfc_tasks; DELETE FROM fc2sfc_triggers; DELETE FROM meta WHERE table_name IN ('fc2sfc_tasks','fc2sfc_triggers');"
+```
 
 ---
 
 ## 注意事项
 
-1. **Athena 查询时间变长**：新 SQL join 了 3 张表（`wh_order_info`, `wh_order_goods`, `im_item`），全量扫描比原来慢。建议观察实际耗时，必要时考虑在 `wh_order_info` 上加 `add_time` 分区过滤（目前该表在 Athena 是否分区待确认）。
-
-2. **cache 需要强制刷新**：切换后需删除 `results/athena_cache.csv` 和 `results/athena_cache_ts.txt`，让系统重跑 Athena 查询。
-
-3. **服务器部署**：需要把更新后的 `data/loader.py` 推送到服务器 `/opt/inv-allocation/data/loader.py`，并重启 `inv-allocation.service`。
-
----
-
-## 相关调查文件
-
-| 文件 | 用途 |
-|------|------|
-| `scripts/_debug_today/_test_new_sql.py` | 验证新 SQL 的 Athena 测试脚本 |
-| `scripts/_debug_today/_desc_wh_inv.py` | `wh_inventory_transaction_by_day` 表结构探查 |
-| `scripts/_debug_today/_q.py` | `xysc_order_info` + `xysc_order_goods` 对比查询 |
-| `scripts/_debug_today/_ob7.py` (服务器) | `wh_picking_order_item` 出库明细验证 |
-| `scripts/_debug_today/_sqlite_fby_check.py` | FBY 覆盖率统计（确认旧 Athena 缺失比例） |
+1. **Athena 查询时间变长**：新 SQL 跨 3 张大表，全量约 90~120 秒。
+2. **Sales TTL 12 小时**：SQLite `sales` 表每 12 小时自动更新一次。需立即生效时按上方步骤清空。
+3. **FC→SFC 任务列表 TTL 1 小时**：segment 改变后需手动清空 `fc2sfc_tasks`，或等 1 小时自动重建。
