@@ -152,8 +152,34 @@ log.append(f"inventory: {len(df_inv):,} SKUs in {elapsed:.1f}s")
 in_stock = df_inv["item_number"].tolist()
 
 # ── Step 2: Sales data (12-hour TTL) ──────────────────────────────────────────
-if db.age_minutes("sales") < 12 * 60:
-    print("  [2] Sales — cache fresh, reading from SQLite.")
+# Sales refresh policy: once per day, after 05:00 ET.
+# Athena snapshot (wh_inventory_transaction_by_day) writes ~03:07-03:24 ET,
+# so 05:00 ET ensures the snapshot is fully written before we query.
+# This avoids a "drift trap" where the 12h TTL could roll into the snapshot window.
+def _sales_needs_refresh() -> bool:
+    """Return True if we should re-run Athena today."""
+    from datetime import date
+    NJ = ZoneInfo("America/New_York")
+    now_et  = datetime.now(NJ)
+    target  = now_et.replace(hour=5, minute=0, second=0, microsecond=0)
+    # Not yet 05:00 ET today → don't run
+    if now_et < target:
+        return False
+    # Check last sales update
+    age_min = db.age_minutes("sales")
+    if age_min > 9999:  # never run
+        return True
+    # Already ran today after 05:00 ET?
+    last_updated_utc = datetime.now(UTC) - __import__("datetime").timedelta(minutes=age_min)
+    last_updated_et  = last_updated_utc.astimezone(NJ)
+    last_target_et   = last_updated_et.replace(hour=5, minute=0, second=0, microsecond=0)
+    # If last update is from today and after 05:00 ET → cache still good
+    if last_updated_et.date() == now_et.date() and last_updated_et >= last_target_et:
+        return False
+    return True
+
+if not _sales_needs_refresh():
+    print("  [2] Sales — cache fresh (today after 05:00 ET), reading from SQLite.")
     df_sales = db.read_sales()
     log.append("sales: cache hit (skipped)")
 else:

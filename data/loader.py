@@ -351,6 +351,10 @@ def load():
             QueryExecutionContext={"Database": "yamibuy_wh"},
             WorkGroup=workgroup,
             ResultConfiguration={"OutputLocation": s3_out},
+            # Disable result reuse: always run a fresh query, never return cached results.
+            # This ensures local (ziyi.fang workgroup) and server (aiagent workgroup)
+            # always get the same data from the same tables at query time.
+            ResultReuseConfiguration={"ResultReuseByAgeConfiguration": {"Enabled": False}},
         )
         qid = resp["QueryExecutionId"]
 

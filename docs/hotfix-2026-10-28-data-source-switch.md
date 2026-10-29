@@ -192,3 +192,4 @@ sqlite3 results/sfc_cache.db "DELETE FROM fc2sfc_tasks; DELETE FROM fc2sfc_trigg
 1. **Athena 查询时间变长**：新 SQL 跨 3 张大表，全量约 90~120 秒。
 2. **Sales TTL 12 小时**：SQLite `sales` 表每 12 小时自动更新一次。需立即生效时按上方步骤清空。
 3. **FC→SFC 任务列表 TTL 1 小时**：segment 改变后需手动清空 `fc2sfc_tasks`，或等 1 小时自动重建。
+4. **快照写入窗口抖动（已知现象，无需修复）**：`wh_inventory_transaction_by_day` 每天约 03:07~03:24 ET 写入前一天快照。若 refresh 在此窗口内运行，`inv_30` 滚动窗口会把最老一天挤出，导致部分边界 SKU 的 `order_lines_30d` 短暂降低，segment 可能出现 100~300 个 SKU 的抖动（TOP↔MIDDLE）。**Crontab 运行点（UTC 整点/半点）已自然避开该窗口（07:00 UTC 在窗口前，07:30 UTC 在窗口后），正常调度不受影响。手动触发 refresh 时，避开 03:07~03:24 ET 即可。**

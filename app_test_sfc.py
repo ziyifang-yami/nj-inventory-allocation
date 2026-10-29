@@ -55,7 +55,7 @@ class _timed:
     def __exit__(self, *a): _timings[self.label] = time.perf_counter() - self._t
 
 # ── Step 1: Sales data — always from SQLite, refresh via sidebar button only ──
-_CACHE_MAX_H = 12
+_CACHE_MAX_H = 23  # daily at 05:00 ET — warn if older than 23h
 
 # Sidebar — must run before cfg so slider values are available
 with st.sidebar:
@@ -69,8 +69,8 @@ with st.sidebar:
         return f"✅ {age_h:.1f}h ago"
 
     # ── Individual refresh buttons ────────────────────────────
-    st.caption("**Sales** (Athena, 12h TTL)")
-    st.caption(_age_badge("sales", 12))
+    st.caption("**Sales** (Athena, daily at 05:00 ET)")
+    st.caption(_age_badge("sales", 20))
     if st.button("↻ Sales", key="btn_sales", use_container_width=True):
         with st.spinner("Querying Athena... (~50s)"):
             try:
@@ -172,7 +172,7 @@ cfg["t1_mid_target_d2s"] = 7
 # This is a safety net — cron normally handles this every 30min.
 # If cron missed a run (stale lock etc.), this catches it silently.
 _OVERDUE = {
-    "sales":     12 * 60,   # 12h in minutes
+    "sales":     23 * 60,   # daily at 05:00 ET — treat as stale after 23h
     "exp_flags": 12 * 60,
     "fc_exp":    35,         # 30min + 5min buffer
     "sfc_lots":  35,         # 30min + 5min buffer
