@@ -53,6 +53,44 @@ Dashboard (8508) 对商品 `5021184261` (FBY) 显示 segment = TAIL，
 
 **`allocated_qty` 字段不纳入过滤条件**：`allocated_qty` 是已被订单预占、等待拣货的数量，是 `quantity` 的子集（物理库存里的一部分）。我们用 `quantity > 0` 判断"这天有没有在库库存"，目的是统计 `inv_days_30`。如果改成 `quantity - allocated_qty > 0`，会把"全部被预占但仍在库"的天排除，反而低估在库天数。因此保持 `quantity > 0` 不变。
 
+#### 旧 SQL（已废弃）
+
+```sql
+WITH inv_days AS (
+    SELECT item_number, dt AS inv_date,
+           ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY dt DESC) AS rn
+    FROM yamibuy_inventory.inventory_record
+    WHERE warehouse_number = '002'
+      AND virtual_qty = 0
+      AND available_qty > 0
+      AND (item_number LIKE '1%' OR item_number LIKE '5%')
+),
+inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
+sales AS (
+    SELECT item_number, day_id,
+           SUM(orders) AS daily_orders,
+           SUM(sales)  AS daily_sales
+    FROM dwb_trade.trade_item_sale_agg_daily
+    WHERE warehouse_number = '002'
+      AND orders > 0
+      AND (item_number LIKE '1%' OR item_number LIKE '5%')
+    GROUP BY item_number, day_id
+)
+SELECT
+    i.item_number,
+    COUNT(DISTINCT i.inv_date)                              AS inv_days_30,
+    COUNT(DISTINCT s.day_id)                               AS active_order_days,
+    COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE), 0)       AS order_lines_30d,
+    COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE) / 30.0, 0) AS avg_daily_orders,
+    COALESCE(SUM(s.daily_sales), 0)                        AS sales_units_30d
+FROM inv_30 i
+LEFT JOIN sales s
+    ON s.item_number = i.item_number AND s.day_id = i.inv_date
+GROUP BY i.item_number
+```
+
+**Athena database（旧）**: `yamibuy_inventory`
+
 #### 新 SQL（当前生效）
 
 ```sql
