@@ -1,7 +1,7 @@
 # NJ 库存分配系统 — v4
 
 NJ 仓库双仓库存管理系统（FC ↔ SFC），提供实时库存转移计划与上架决策。  
-以三个 Streamlit 应用 + 一个 FastAPI 上架指引形式运行在服务器上。
+以三个 Streamlit 应用运行在服务器上。
 
 **运行中的应用：**
 
@@ -10,7 +10,76 @@ NJ 仓库双仓库存管理系统（FC ↔ SFC），提供实时库存转移计�
 | 8508 | `app.py` | 主看板（总览 · 前后对比 · FC→SFC · SFC→FC · 上架） |
 | 8512 | `app_test_sfc.py` | SFC→FC 任务列表（测试视图） |
 | 8513 | `app_test_fc2sfc.py` | FC→SFC 任务列表（测试视图） |
-| 8504 | warehouse-recommendation 仓库 | 上架指引 — 扫 BT/GT 条码 |
+
+---
+
+## 项目结构
+
+```
+NJ_Inventory_Allocation/
+├── app.py                    # 主服务入口（8508，生产）
+├── app_test_fc2sfc.py        # FC→SFC 测试服务（8513）
+├── app_test_sfc.py           # SFC→FC 测试服务（8512）
+├── cache_db.py               # SQLite 缓存封装
+├── config.py                 # 阈值配置（aod_top/ol_top/ol_tail 等）
+├── refresh_sfc_cache.py      # 定时缓存刷新（cron 调用）
+├── refresh_watchdog.py       # 刷新看门狗
+├── requirements.txt
+├── .env / .env.example
+│
+├── data/
+│   └── loader.py             # Athena + MySQL 数据加载层 ← 核心，勿随意修改
+│
+├── logic/
+│   ├── classify.py           # SKU 分段逻辑（TOP/MIDDLE/TAIL/TBD）
+│   ├── fc_to_sfc.py          # FC→SFC 调拨引擎
+│   ├── sfc_to_fc.py          # SFC→FC 补货引擎
+│   └── putaway.py            # 上架决策引擎
+│
+├── tests/                    # 对应 logic/ 的单测 + 属性测试
+│
+├── docs/
+│   ├── design.md             # 系统设计文档
+│   ├── LOGIC.md              # 核心逻辑说明
+│   ├── ui-layout-guide.md    # UI 布局指南
+│   └── hotfix-2026-10-28-data-source-switch.md  # ← 最新热补记录
+│
+├── results/                  # 运行时缓存（不进 git）
+│   ├── sfc_cache.db
+│   ├── athena_cache.csv / athena_cache_ts.txt
+│   └── *.parquet / *_ts.txt
+│
+└── scripts/
+    ├── _deploy_apps.py       # 部署主应用到服务器
+    ├── _deploy_watchdog.py   # 部署看门狗
+    ├── _restart_services.py  # 重启服务
+    ├── _find_service.py      # 查服务状态
+    ├── _ssh_check.py         # SSH 健康检查
+    ├── _force_refresh.sh     # 强制刷新缓存
+    ├── _check_refresh.sh     # 检查刷新状态
+    ├── _srv_check.sh         # 服务器状态检查
+    ├── check_cache_age.py    # 检查缓存新鲜度
+    ├── check_sku_seg.py      # 检查 SKU segment
+    ├── check_athena_history.py # 查 Athena 历史
+    │
+    ├── _debug_today/         # 当日临时调试脚本（不进 git）
+    └── _archive/             # 历史脚本归档
+        ├── deploy/           # 旧部署脚本
+        ├── check/            # 旧检查脚本
+        ├── debug/            # 旧调试脚本
+        └── force/            # 旧强制刷新脚本
+```
+
+---
+
+## 数据源（2026-10-28 更新）
+
+| 用途 | 表 | 说明 |
+|------|-----|------|
+| 库存快照 | `yamibuy_wh.wh_inventory_transaction_by_day` | 每日库位库存快照（WH 层） |
+| 销售订单 | `yamibuy_wh.wh_order_info` + `wh_order_goods` + `yamibuy_im.im_item` | 完成订单，通过 goods_id join 解决 bundle/combo 问题 |
+
+> 详见 `docs/hotfix-2026-10-28-data-source-switch.md`
 
 ---
 

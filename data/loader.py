@@ -279,8 +279,16 @@ def load():
                 aws_profile = "athena-prod"
             elif any(s in ("profile prod", "prod") for s in sections):
                 aws_profile = "prod"
+            elif any("prod-ziyi.fang" in s for s in sections):
+                # SSO profile on local dev (e.g. prod-ziyi.fang-406921510350)
+                aws_profile = next(s.replace("profile ", "") for s in sections if "prod-ziyi.fang" in s)
             else:
                 aws_profile = "default"
+
+        # On local SSO dev: clear IAM key env vars so boto3 uses SSO profile token
+        if os.getenv("AWS_ACCESS_KEY_ID") and aws_profile not in ("default",):
+            os.environ.pop("AWS_ACCESS_KEY_ID", None)
+            os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
 
         session  = boto3.Session(profile_name=aws_profile)
         athenac  = session.client("athena", region_name="us-west-2")
@@ -292,41 +300,51 @@ def load():
 
         SQL_SALES = """
         WITH inv_days AS (
-            SELECT item_number, dt AS inv_date,
-                   ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY dt DESC) AS rn
-            FROM yamibuy_inventory.inventory_record
-            WHERE warehouse_number = '002'
-              AND virtual_qty = 0
-              AND available_qty > 0
-              AND (item_number LIKE '1%' OR item_number LIKE '5%')
+            SELECT item_number, day_id AS inv_date,
+                   ROW_NUMBER() OVER (PARTITION BY item_number ORDER BY day_id DESC) AS rn
+            FROM (
+                SELECT DISTINCT item_number, day_id
+                FROM yamibuy_wh.wh_inventory_transaction_by_day
+                WHERE warehouse_number = '002'
+                  AND quantity > 0
+                  AND (item_number LIKE '1%' OR item_number LIKE '5%')
+            ) t
         ),
         inv_30 AS (SELECT item_number, inv_date FROM inv_days WHERE rn <= 30),
         sales AS (
-            SELECT item_number, day_id,
-                   SUM(orders) AS daily_orders,
-                   SUM(sales)  AS daily_sales
-            FROM dwb_trade.trade_item_sale_agg_daily
-            WHERE warehouse_number = '002'
-              AND orders > 0
-              AND (item_number LIKE '1%' OR item_number LIKE '5%')
-            GROUP BY item_number, day_id
+            SELECT ii.item_number, oi.order_id,
+                   CAST(DATE(DATE_FORMAT(FROM_UNIXTIME(oi.add_time), '%Y-%m-%d')) AS VARCHAR) AS sale_date,
+                   og.goods_number AS daily_sales
+            FROM yamibuy_wh.wh_order_info oi
+            JOIN yamibuy_wh.wh_order_goods og ON og.order_id = oi.order_id
+            JOIN yamibuy_im.im_item ii ON og.goods_id = ii.goods_id
+            WHERE oi.warehouse_number = '002'
+              AND oi.order_status NOT IN (0, 3)
+              AND (ii.item_number LIKE '1%' OR ii.item_number LIKE '5%')
+        ),
+        sales_agg AS (
+            SELECT item_number, sale_date,
+                   COUNT(DISTINCT order_id) AS daily_orders,
+                   SUM(daily_sales)         AS daily_sales
+            FROM sales
+            GROUP BY item_number, sale_date
         )
         SELECT
             i.item_number,
-            COUNT(DISTINCT i.inv_date)                             AS inv_days_30,
-            COUNT(DISTINCT s.day_id)                               AS active_order_days,
-            COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE), 0)       AS order_lines_30d,
+            COUNT(DISTINCT i.inv_date)                              AS inv_days_30,
+            COUNT(DISTINCT s.sale_date)                             AS active_order_days,
+            COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE), 0)        AS order_lines_30d,
             COALESCE(CAST(SUM(s.daily_orders) AS DOUBLE) / 30.0, 0) AS avg_daily_orders,
-            COALESCE(SUM(s.daily_sales), 0)                        AS sales_units_30d
+            COALESCE(SUM(s.daily_sales), 0)                         AS sales_units_30d
         FROM inv_30 i
-        LEFT JOIN sales s
-            ON s.item_number = i.item_number AND s.day_id = i.inv_date
+        LEFT JOIN sales_agg s
+            ON s.item_number = i.item_number AND s.sale_date = i.inv_date
         GROUP BY i.item_number
         """
 
         resp = athenac.start_query_execution(
             QueryString=SQL_SALES,
-            QueryExecutionContext={"Database": "yamibuy_inventory"},
+            QueryExecutionContext={"Database": "yamibuy_wh"},
             WorkGroup=workgroup,
             ResultConfiguration={"OutputLocation": s3_out},
         )

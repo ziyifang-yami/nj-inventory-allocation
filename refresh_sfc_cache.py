@@ -59,7 +59,15 @@ log = []
 t_start = time.perf_counter()
 
 # ── Lock: prevent concurrent refresh runs (avoids multiple slow queries) ───────
-import fcntl as _fcntl
+import sys as _sys
+if _sys.platform == "win32":
+    # Windows: no fcntl, use a simple no-op lock
+    class _fcntl:
+        LOCK_EX = LOCK_NB = 0
+        @staticmethod
+        def flock(fh, flags): pass
+else:
+    import fcntl as _fcntl
 _LOCK_FILE = Path("results/refresh.lock")
 _LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -646,17 +654,23 @@ else:
     print("  [9] Loading pending putaway from RECG locations...")
     try:
         import signal as _signal
+        import sys as _sys
 
-        def _putaway_timeout_handler(signum, frame):
-            raise TimeoutError("pending_putaway query exceeded timeout")
-
-        _signal.signal(_signal.SIGALRM, _putaway_timeout_handler)
-        _signal.alarm(_PUTAWAY_TIMEOUT_S)
-        try:
+        if _sys.platform == "win32":
+            # Windows: no SIGALRM — run without timeout
             from data.loader import load_pending_putaway as _load_pa
             _df_pa, _pa_err = _load_pa()
-        finally:
-            _signal.alarm(0)  # cancel alarm
+        else:
+            def _putaway_timeout_handler(signum, frame):
+                raise TimeoutError("pending_putaway query exceeded timeout")
+
+            _signal.signal(_signal.SIGALRM, _putaway_timeout_handler)
+            _signal.alarm(_PUTAWAY_TIMEOUT_S)
+            try:
+                from data.loader import load_pending_putaway as _load_pa
+                _df_pa, _pa_err = _load_pa()
+            finally:
+                _signal.alarm(0)  # cancel alarm
 
         if _pa_err:
             print(f"      Pending putaway query failed: {_pa_err}")
